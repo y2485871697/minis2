@@ -553,30 +553,6 @@ internal fun canonicalStreamingDelta(message: ChatMessage?): StreamingDelta? = m
     )
 }
 
-/**
- * [T-android-stream-growth-glitch] Whether the LazyColumn item at [index]
- * (reverse-mapped past the leading search/compact rows) is the live
- * streaming row. Same classification the reading-anchor collector uses, so
- * the measure-phase bridge and the collector agree on which growth counts.
- */
-internal fun chatRowIsLive(
-    flatItems: List<FlatChatItem>,
-    index: Int,
-    key: Any?,
-    leadingRows: Int,
-): Boolean {
-    val row = flatItems.getOrNull(flatItems.size - 1 - (index - leadingRows))
-        ?.takeIf { it.key == key }
-        ?: return false
-    return when (row) {
-        is FlatChatItem.AssistantText -> row.isStreaming
-        is FlatChatItem.AssistantMarkdownBlock -> row.messageIsStreaming
-        is FlatChatItem.AssistantThinking -> row.messageIsStreaming && row.isLastBlockOverall
-        is FlatChatItem.AssistantLegacyContent -> row.isStreaming
-        else -> false
-    }
-}
-
 internal fun buildFlatChatItems(
     messages: List<ChatMessage>,
     // [T-android-perf-logging] Optional — when supplied, emit a progress
