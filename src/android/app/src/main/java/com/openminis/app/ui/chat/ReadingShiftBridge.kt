@@ -25,11 +25,10 @@ import androidx.compose.ui.layout.layout
  *    [pending] and returned, and the modifier places the list with
  *    `placeRelative(0, pending)` — cancelling the shift in the SAME frame
  *    it would have been visible.
- *  - while the response is still streaming, the collector does not also move
- *    the LazyColumn. The pending translation stays active, so there is no
- *    measure/scroll hand-off on every chunk. Once streaming and its final
- *    layout drain finish, the collector takes the accumulated amount once
- *    and transfers it to the real scroll position.
+ *  - the collector transfers the pending translation to the real scroll
+ *    position at most once per frame. This keeps the temporary placement
+ *    offset bounded even when the provider emits several chunks before the
+ *    next layout pass.
  *
  * The accounting deliberately mirrors the collector's rules (live-row latch,
  * drain window, reading gate) so the pre-paid amount and the dispatched

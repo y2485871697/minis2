@@ -87,11 +87,14 @@ class ReadingShiftBridgeTest {
         .map { File(it, "com/openminis/app/ui/chat/$name.kt") }.first { it.isFile }
         .readText().replace("\r\n", "\n")
 
-    @Test fun lazyColumnPrePaysShiftAndCollectorDispatchesTheSameDebt() {
+    @Test fun lazyColumnPrePaysShiftAndDrainsDebtPerFrame() {
         val screen = source("ChatScreen")
         assertTrue(screen.contains(".readingShiftBridge {"))
         assertTrue(screen.contains("streamShiftBridge.onAnchorObserved("))
         assertTrue(screen.contains("val owed = streamShiftBridge.takePending()"))
+        assertTrue(screen.contains("withFrameNanos { }"))
+        assertTrue("the collector must not defer all placement debt until stream end",
+            !screen.contains("if (viewModel.isStreaming.value ||"))
         assertTrue("collector must drain the bridge, not double-apply its own diff",
             !screen.contains("dispatchRawDelta(growth.toFloat())"))
         assertTrue(screen.contains("Snapshot.withoutReadObservation"))

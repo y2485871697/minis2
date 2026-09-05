@@ -3715,14 +3715,12 @@ fun ChatScreen(
                             streamShiftBridge.reset()
                             return@collect
                         }
-                        // Keep the bridge's placement compensation in charge for
-                        // the active stream. Moving LazyColumn on every chunk
-                        // creates the measured flicker; transfer the accumulated
-                        // debt only once after the final layout drain.
-                        if (viewModel.isStreaming.value ||
-                            (lastStreamEndMs > 0L &&
-                                System.currentTimeMillis() - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS)
-                        ) return@collect
+                        // Transfer the visual pre-payment back to the real
+                        // scroll position once per frame. Waiting until the
+                        // stream ends lets the whole LazyColumn accumulate a
+                        // large placement offset and can push every historical
+                        // row outside the parent's clipping bounds.
+                        withFrameNanos { }
                         val owed = streamShiftBridge.takePending()
                         if (owed > 0) {
                             val now = System.currentTimeMillis()
