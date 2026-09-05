@@ -3676,6 +3676,64 @@ fun ChatScreen(
                     (if (canResume && !isStreaming && error == null &&
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
+                // A user can remain inside the currently generating assistant
+                // row after leaving the live edge. reverseLayout then keeps the
+                // growing row's clipped edge anchored and moves the reader's
+                // viewport a little on every remeasure. Compensate only the
+                // measured growth of that one visible row in the real list
+                // state. This keeps the reading position stable without moving
+                // the whole LazyColumn through a layout-time offset.
+                LaunchedEffect(listState, sessionId, searchLeadingRows) {
+                    var previousKey: Any? = null
+                    var previousSize = 0
+                    var previousOffset = 0
+                    snapshotFlow {
+                        val info = listState.layoutInfo
+                        val first = info.visibleItemsInfo.firstOrNull { it.index == listState.firstVisibleItemIndex }
+                        val row = first?.let {
+                            flatItems.getOrNull(flatItems.size - 1 - (it.index - searchLeadingRows))
+                                ?.takeIf { item -> item.key == it.key }
+                        }
+                        val live = when (row) {
+                            is FlatChatItem.AssistantText -> row.isStreaming
+                            is FlatChatItem.AssistantMarkdownBlock -> row.messageIsStreaming
+                            is FlatChatItem.AssistantThinking -> row.messageIsStreaming && row.isLastBlockOverall
+                            is FlatChatItem.AssistantLegacyContent -> row.isStreaming
+                            else -> false
+                        }
+                        Triple(first, live, viewModel.isStreaming.value)
+                    }.collect { (first, live, streaming) ->
+                        if (first == null || !live || !streaming ||
+                            !userScrolledAway || isUserDragging || userDragAwaitingSettle
+                        ) {
+                            previousKey = first?.key
+                            previousSize = first?.size ?: 0
+                            previousOffset = listState.firstVisibleItemScrollOffset
+                            return@collect
+                        }
+                        if (first.key != previousKey ||
+                            listState.firstVisibleItemScrollOffset != previousOffset
+                        ) {
+                            previousKey = first.key
+                            previousSize = first.size
+                            previousOffset = listState.firstVisibleItemScrollOffset
+                            return@collect
+                        }
+                        val growth = first.size - previousSize
+                        previousSize = first.size
+                        if (growth > 0) {
+                            // Wait until Compose has committed this measurement,
+                            // then apply one correction for this row only.
+                            withFrameNanos { }
+                            if (viewModel.isStreaming.value &&
+                                userScrolledAway && !isUserDragging && !userDragAwaitingSettle
+                            ) {
+                                listState.dispatchRawDelta(growth.toFloat())
+                                previousOffset = listState.firstVisibleItemScrollOffset
+                            }
+                        }
+                    }
+                }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
