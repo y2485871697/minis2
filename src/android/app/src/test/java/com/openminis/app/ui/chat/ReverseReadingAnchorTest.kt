@@ -66,7 +66,7 @@ class ReverseReadingAnchorTest {
         assertTrue(source.contains("val owed = streamShiftBridge.takePending()"))
         assertTrue(source.contains("listState.dispatchRawDelta(owed.toFloat())"))
         assertTrue(bridge.contains("growth > 0 && liveLatch"))
-        assertTrue(bridge.contains("!reading || !draining"))
+        assertTrue(bridge.contains("!reading || key == null"))
         assertTrue(source.contains("verticalArrangement = Arrangement.spacedBy(2.dp),"))
     }
 }
