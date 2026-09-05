@@ -3682,8 +3682,8 @@ fun ChatScreen(
                 // [T-android-stream-growth-glitch] Measures the anchored row's
                 // growth during the layout pass and pre-pays the compensation
                 // visually (see ReadingShiftBridge), so the one-frame window
-                // between a streamed height change and the dispatchRawDelta
-                // correction below never renders as a visible jump.
+                // between a streamed height change and the final scroll
+                // correction never renders as a visible jump.
                 val streamShiftBridge = remember(listState) { ReadingShiftBridge() }
                 LaunchedEffect(listState, sessionId) {
                     var lastLogMs = 0L
@@ -3706,27 +3706,23 @@ fun ChatScreen(
                                 info.viewportSize.width, info.viewportSize.height,
                                 info.beforeContentPadding, info.afterContentPadding)
                         }
-                        Triple(current, userScrolledAway && pendingSearchMessageId == null, live)
+                        val draining = viewModel.isStreaming.value ||
+                            (lastStreamEndMs > 0L &&
+                                System.currentTimeMillis() - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS)
+                        Triple(current, userScrolledAway && pendingSearchMessageId == null, draining)
                     }.distinctUntilChanged().collect { (current, reading, _) ->
                         if (!reading || current == null) {
                             streamShiftBridge.reset()
                             return@collect
                         }
-                        // This is geometry compensation, not a new scroll intent.
-                        // Coalesce geometry changes until the next frame. Streaming
-                        // markdown commonly publishes several layout changes in one
-                        // frame; dispatching each raw delta immediately causes a
-                        // visible oscillation while Compose is still remeasuring.
-                        //
-                        // The amount dispatched is whatever the measure-phase
-                        // bridge is still owed — it has been pre-paying this
-                        // shift visually since the frame that grew the row, so
-                        // taking the correction from it keeps scroll and pixels
-                        // in exact agreement (single authority, no double-apply).
-                        // The bridge only accumulates while the anchor row is the
-                        // live streaming row and the drain window is open, so an
-                        // owed>0 emission always follows a real geometry change.
-                        withFrameNanos { }
+                        // Keep the bridge's placement compensation in charge for
+                        // the active stream. Moving LazyColumn on every chunk
+                        // creates the measured flicker; transfer the accumulated
+                        // debt only once after the final layout drain.
+                        if (viewModel.isStreaming.value ||
+                            (lastStreamEndMs > 0L &&
+                                System.currentTimeMillis() - lastStreamEndMs in 0..STREAM_END_ARM_GRACE_MS)
+                        ) return@collect
                         val owed = streamShiftBridge.takePending()
                         if (owed > 0) {
                             val now = System.currentTimeMillis()
@@ -3736,6 +3732,7 @@ fun ChatScreen(
                                 AppLogger.debug("ScrollReadingAnchor", "growth=$owed consumed=$consumed key=${current.key}")
                             }
                         }
+                        streamShiftBridge.reset()
                     }
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {

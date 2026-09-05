@@ -25,11 +25,11 @@ import androidx.compose.ui.layout.layout
  *    [pending] and returned, and the modifier places the list with
  *    `placeRelative(0, pending)` — cancelling the shift in the SAME frame
  *    it would have been visible.
- *  - the reading-anchor collector then performs the real scroll correction
- *    on its next tick via [takePending], and the re-measure that follows the
- *    dispatch observes pending==0, so the temporary translation returns to
- *    zero exactly when the scroll position takes over. Net visible motion:
- *    zero, on every frame.
+ *  - while the response is still streaming, the collector does not also move
+ *    the LazyColumn. The pending translation stays active, so there is no
+ *    measure/scroll hand-off on every chunk. Once streaming and its final
+ *    layout drain finish, the collector takes the accumulated amount once
+ *    and transfers it to the real scroll position.
  *
  * The accounting deliberately mirrors the collector's rules (live-row latch,
  * drain window, reading gate) so the pre-paid amount and the dispatched
@@ -68,10 +68,14 @@ internal class ReadingShiftBridge {
         reading: Boolean,
         draining: Boolean,
     ): Int {
-        if (!reading || !draining || key == null) {
+        if (!reading || key == null) {
             reset()
             return 0
         }
+        // Keep the visual debt until the collector can transfer it once at
+        // stream end. Resetting here would remove the placement compensation
+        // before the real scroll correction runs.
+        if (!draining) return 0
         if (key != this.key) {
             this.key = key
             this.size = size
