@@ -3754,37 +3754,17 @@ fun ChatScreen(
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
                 // [T-android-reading-anchor] The reader-detached position
-                // keeper. While a turn is live and the user has detached from
-                // the live edge, live rows report min(real, frozen) from their
-                // measure pass. Streaming growth is therefore withheld in the
-                // same frame rather than shown and corrected a frame later.
-                // Both gesture directions retain the freeze; only settling at
-                // the live edge reveals the tail. Real shrinkage still lowers
-                // the frozen level for thinking→text handoff. Compaction is
-                // deliberately out of scope: it removes rows under the reader,
-                // which must re-anchor, not hold. See ReadingAnchor.kt.
+                // keeper. Live rows always report their real height so streamed
+                // text remains visible; growth is compensated by the measure
+                // frame when still and by nested scroll during a gesture.
+                // Compaction is deliberately out of scope: it removes rows
+                // under the reader, which must re-anchor, not hold. See
+                // ReadingAnchor.kt.
                 val readingAnchorActive: () -> Boolean = {
                     ScrollDebugFlags.readingAnchorEnabled &&
                         userScrolledAway && pendingSearchMessageId == null &&
                         (viewModel.isStreaming.value ||
                             (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
-                }
-                // [T-android-reading-anchor] The freeze lifts away from the
-                // live edge with the tail withheld: hand it to the viewport
-                // as one raw delta so the reading point does not jump (the
-                // old scheme's release rule). One frame late by dispatch
-                // timing — the shipped release behavior.
-                LaunchedEffect(readingAnchor, listState) {
-                    snapshotFlow { readingAnchor.releaseCompensation }.collect { compensation ->
-                        if (compensation != 0) {
-                            readingAnchor.releaseCompensation = 0
-                            listState.dispatchRawDelta(compensation.toFloat())
-                            AppLogger.debug(
-                                "ScrollReadingAnchor",
-                                "release compensate $compensation",
-                            )
-                        }
-                    }
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
@@ -4087,6 +4067,13 @@ fun ChatScreen(
                         }
                     }
                 }
+                val readingAnchorConnection = remember(readingAnchor, listState) {
+                    ReadingAnchorConnection(
+                        readingAnchor,
+                        listState,
+                        active = readingAnchorActive,
+                    )
+                }
                 LazyColumn(
                     state = listState,
                     reverseLayout = true,
@@ -4113,8 +4100,9 @@ fun ChatScreen(
                         // [T-android-reading-anchor] The detached-reading
                         // freeze host; outermost so it wraps the list's own
                         // measure. See ReadingAnchor.kt.
-                        .readingFreezeHost(
+                        .liveReadingAnchor(
                             readingAnchor,
+                            listState,
                             active = readingAnchorActive,
                             gestureActive = {
                                 isUserDragging || userDragAwaitingSettle || listState.isScrollInProgress
@@ -4134,6 +4122,7 @@ fun ChatScreen(
                             },
                         )
                         .fillMaxWidth()
+                        .nestedScroll(readingAnchorConnection)
                         .nestedScroll(userScrollPauseConnection)
                         // [T-android-chat-max-content-width] Cap the reading
                         // measure on a wide window, mirroring iOS
@@ -4327,14 +4316,12 @@ fun ChatScreen(
                         Box(
                             modifier = Modifier
                                 .then(
-                                    // [T-android-reading-anchor] The per-row
-                                    // freeze: while the reader is detached the
-                                    // live row reports its settled height and
-                                    // growth hides in the clipped overflow
-                                    // below the fold; shrinks (the thinking→
-                                    // text collapse) show instantly.
+                                    // [T-android-reading-anchor] Keep the real
+                                    // row height and probe chunk-sized growth;
+                                    // the host/connection compensates the
+                                    // viewport so streamed text stays visible.
                                     if (isLiveStreamingRow) {
-                                        Modifier.liveRowFreeze(readingAnchor, item.key)
+                                        Modifier.growthProbe(readingAnchor, item.key)
                                     } else {
                                         Modifier
                                     }
