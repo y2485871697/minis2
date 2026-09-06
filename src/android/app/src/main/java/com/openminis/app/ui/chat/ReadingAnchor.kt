@@ -51,9 +51,13 @@ import com.openminis.app.logging.AppLogger
  *    fight it.
  *  - else if the glue top edge rose by `rise` px — streaming growth, a
  *    handoff collapse, an insertion below, anything that changed the content
- *    chain under a still viewport — dispatch exactly `rise` px through
- *    dispatchRawDelta. The position write re-measures the list within this
- *    same frame, so the reader never sees the intermediate geometry.
+ *    chain under a still viewport — request exactly `rise` px via
+ *    requestScrollToItem. The write invalidates the measurement and a
+ *    follow-up measure pass of this same frame applies it, so the reader
+ *    never sees the intermediate geometry. While a request is in flight the
+ *    pass acts ONLY on the measured geometry (the position state leads the
+ *    layout by a pass; trusting it re-requested against stale geometry and
+ *    ping-ponged ±71px on device);
  *  - zero-height measures (recycle/prefetch artifacts) and key changes are
  *    re-baselined, never read as growth.
  *
@@ -85,6 +89,9 @@ internal class ReadingAnchorState {
     /** Delta dispatched in the previous pass and not yet seen applied. */
     internal var pendingDelta: Int = 0
 
+    /** The glue top edge the pending request was computed from. */
+    internal var pendingTopPx: Int = 0
+
     internal var primed: Boolean = false
 
     fun reset() {
@@ -93,6 +100,7 @@ internal class ReadingAnchorState {
         lastIdx = -1
         lastOff = -1
         pendingDelta = 0
+        pendingTopPx = 0
         primed = false
     }
 }
@@ -136,35 +144,46 @@ internal fun Modifier.liveReadingAnchor(
                 state.lastOff = off
                 state.pendingDelta = 0
                 state.primed = true
-            } else {
-                val ourDeltaApplied = state.pendingDelta != 0 &&
-                    idx == state.lastIdx && off == state.lastOff + state.pendingDelta
-                if (ourDeltaApplied) {
-                    // Our compensation landed. Judge the residual against the
-                    // target held across the apply, so growth composed into
-                    // the same frame is absorbed too instead of re-baselined.
-                    state.lastIdx = idx
+            } else if (state.pendingDelta != 0) {
+                // A request is in flight. The position STATE leads the
+                // measured GEOMETRY by a pass (the on-device 19:46 trace:
+                // trusting the state re-requested against stale geometry and
+                // ping-ponged ±71px) — judge only by the glue row's offset.
+                val expectedOffset = -(state.lastOff + state.pendingDelta)
+                if (glue.offset == expectedOffset) {
+                    // Applied. Judge the residual against the target held
+                    // across the apply; growth composed into the same frame
+                    // is absorbed instead of re-baselined.
                     state.lastOff = off
                     val rise = top - state.glueTopPx
+                    state.pendingDelta = 0
                     if (rise != 0) {
-                        requestRise(state, listState, rise, glue.key, idx, off)
-                    } else {
-                        state.pendingDelta = 0
+                        requestRise(state, listState, rise, glue.key, idx, off, top)
                     }
-                } else {
-                    val positionMoved = idx != state.lastIdx || off != state.lastOff
+                } else if (top != state.pendingTopPx || idx != state.lastIdx) {
+                    // The geometry moved while the request was in flight
+                    // (further growth) or an external mover intervened: the
+                    // request is stale — adopt the current geometry and
+                    // re-judge from it next pass.
+                    state.pendingDelta = 0
+                    state.glueTopPx = top
                     state.lastIdx = idx
                     state.lastOff = off
-                    if (positionMoved) {
-                        // A drag, fling or programmatic jump owns the viewport
-                        // — follow it; never fight it.
-                        state.pendingDelta = 0
-                        state.glueTopPx = top
-                    } else {
-                        val rise = top - state.glueTopPx
-                        if (rise != 0) {
-                            requestRise(state, listState, rise, glue.key, idx, off)
-                        }
+                }
+                // else: still in flight — wait. A second request against the
+                // lagging geometry is exactly what oscillated on device.
+            } else {
+                val positionMoved = idx != state.lastIdx || off != state.lastOff
+                state.lastIdx = idx
+                state.lastOff = off
+                if (positionMoved) {
+                    // A drag, fling or programmatic jump owns the viewport
+                    // — follow it; never fight it.
+                    state.glueTopPx = top
+                } else {
+                    val rise = top - state.glueTopPx
+                    if (rise != 0) {
+                        requestRise(state, listState, rise, glue.key, idx, off, top)
                     }
                 }
             }
@@ -182,6 +201,7 @@ private fun requestRise(
     glueKey: Any?,
     idx: Int,
     off: Int,
+    top: Int,
 ) {
     if (listState.isScrollInProgress) {
         // requestScrollToItem cancels any scroll in progress — a drag or
@@ -191,12 +211,13 @@ private fun requestRise(
         state.glueTopPx += rise
         return
     }
-    // Zero-lag write: the position lands at the follow-up measure pass of
+    // Zero-lag write: the position lands at a follow-up measure pass of
     // THIS frame. A boundary clamp (rise larger than the remaining scroll
     // range — e.g. a collapse that lands the reader at the live edge) shows
-    // up next pass as a position mismatch and re-baselines there.
+    // up as a geometry mismatch against pendingTopPx and re-baselines there.
     listState.requestScrollToItem(idx, off + rise)
     state.pendingDelta = rise
+    state.pendingTopPx = top
     if (ScrollDebugFlags.traceMoves) {
         AppLogger.debug(
             "ScrollReadingAnchor",
