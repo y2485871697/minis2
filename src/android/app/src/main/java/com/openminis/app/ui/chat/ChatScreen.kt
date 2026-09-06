@@ -3775,6 +3775,9 @@ fun ChatScreen(
                         (viewModel.isStreaming.value ||
                             (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
                 }
+                val readingAnchorConnection = remember(readingAnchor) {
+                    ReadingAnchorConnection(readingAnchor, listState, readingAnchorActive)
+                }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
@@ -4101,10 +4104,33 @@ fun ChatScreen(
                     modifier = Modifier
                         // [T-android-reading-anchor] Measure-frame detached-
                         // reading compensation; outermost so it wraps the
-                        // list's own measure. See ReadingAnchor.kt.
-                        .liveReadingAnchor(readingAnchor, listState, active = readingAnchorActive)
+                        // list's own measure. The connection absorbs growth
+                        // during drags/flings in the input-dispatch phase.
+                        // See ReadingAnchor.kt.
+                        .liveReadingAnchor(
+                            readingAnchor,
+                            listState,
+                            active = readingAnchorActive,
+                            gestureActive = {
+                                isUserDragging || userDragAwaitingSettle || listState.isScrollInProgress
+                            },
+                            atLiveEdge = {
+                                listState.firstVisibleItemIndex == 0 &&
+                                    listState.firstVisibleItemScrollOffset <= nearBottomThresholdPx.toInt()
+                            },
+                            onLiveEdgeSettle = {
+                                // The freeze's release-at-live-edge rule: the
+                                // reader who scrolled back to the bottom wants
+                                // the stream — resume follow.
+                                if (userScrolledAway) {
+                                    userScrolledAway = false
+                                    manualDragLeftBottom = false
+                                }
+                            },
+                        )
                         .fillMaxWidth()
                         .nestedScroll(userScrollPauseConnection)
+                        .nestedScroll(readingAnchorConnection)
                         // [T-android-chat-max-content-width] Cap the reading
                         // measure on a wide window, mirroring iOS
                         // AIChatView.maxContentWidth (900pt when the horizontal
