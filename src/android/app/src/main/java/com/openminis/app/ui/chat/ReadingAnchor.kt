@@ -3,9 +3,6 @@ package com.openminis.app.ui.chat
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
-import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.layout.layout
 import com.openminis.app.logging.AppLogger
 
@@ -40,39 +37,22 @@ import com.openminis.app.logging.AppLogger
  * frame first and corrected one frame later; a synchronous dispatchRawDelta
  * from the collector re-entered measure visibly instead).
  *
- * The growth signal is FINGER-IMMUNE by construction: [growthProbe] runs on
- * every row and reports each row's measured height delta — the finger moves
- * the viewport, never row heights, so no consumed-delta subtraction is
- * needed (the previous attempt subtracted the finger from a top-edge shift
- * and the bookkeeping was undone by its own inline remeasures: first the
- * ±22px/8ms flicker, then a fully locked viewport). The list-level pass sums
- * the deltas of the VISIBLE rows only — growth below the viewport or beyond
- * it in the prefetch band cannot disturb the reader.
+ * The correction is requestScrollToItem — never dispatchRawDelta, whose
+ * inline remeasure trips "performMeasureAndLayout called during measure
+ * layout" from inside the list's own measure (the 19:13 crash) and reenters
+ * measurement from a collector (the d746a60 flash). Because it cancels any
+ * in-progress scroll, the pass is skipped while the gesture flags are set:
+ * drags and flings own the viewport. (A gesture-time absorption channel was
+ * attempted three ways — top-edge shift minus the consumed finger delta, and
+ * finger-immune row-height probes — and abandoned: the async markdown
+ * renderer's own per-remeasure height jitter feeds both signals during
+ * scrolling, and absorbing it produced on-device flicker. Motion frames stay
+ * native; the anchor engages the moment the reader settles.)
  *
- * The sum is consumed by two zero-lag channels, one per motion state:
- *
- *  - STILL frames (the reader paused to read): the decision runs inside the
- *    LazyColumn's own measure pass; the glue = the topmost visible row,
- *    tracked BY KEY so index shifts from live-edge insertions and handoffs
- *    never break the reference. If the glue top edge rose by `rise` px under
- *    a still scroll position, requestScrollToItem writes the corrected
- *    position and a follow-up measure pass of the SAME frame applies it. The
- *    position STATE leads the measured GEOMETRY by a pass (the on-device
- *    19:46 trace: trusting the state re-requested against stale geometry and
- *    ping-ponged ±71px), so an in-flight request is judged only by the glue
- *    row's measured offset.
- *  - MOVING frames (drag / fling): [ReadingAnchorConnection] dispatches the
- *    probed growth in the input-dispatch phase — OUTSIDE any measure pass,
- *    where dispatchRawDelta's inline remeasure is legal (from inside the
- *    list's own measure it trips "performMeasureAndLayout called during
- *    measure layout", the measured 19:13 crash).
- *
- * requestScrollToItem — NOT dispatchRawDelta — applies the still-frame
- * correction, because dispatchRawDelta force-remeasures synchronously; the
- * still pass is skipped while the gesture flags are set, which is what the
- * connection is for. Positive correction = viewport toward older content =
- * exactly the direction that undoes a top-edge rise (measured 04:47 anchor
- * trace: growth=N → +N, snap back).
+ * The position STATE also leads the measured GEOMETRY by a pass (the
+ * on-device 19:46 trace: trusting the state re-requested against stale
+ * geometry and ping-ponged ±71px), so an in-flight request is judged only by
+ * the glue row's measured offset.
  *
  * At the live edge the anchor stands down entirely and releases the hard
  * pause: the reader who scrolled back to the bottom wants the stream, and
@@ -80,17 +60,6 @@ import com.openminis.app.logging.AppLogger
  * (the freeze's release-at-live-edge rule).
  */
 internal class ReadingAnchorState {
-    // ── finger-immune growth probes ──
-    /** Last measured height per row key (persists across recycle). */
-    internal val rowHeights = HashMap<Any, Int>()
-
-    /** Un-consumed height deltas per row key, accumulated by the probes. */
-    internal val rowDeltas = HashMap<Any, Int>()
-
-    /** Sum of the visible rows' un-consumed deltas, refreshed per pass. */
-    internal var pendingGrowth: Int = 0
-
-    // ── still-frame glue bookkeeping ──
     /** Key of the row the reading position glues to. */
     internal var glueKey: Any? = null
 
@@ -109,9 +78,6 @@ internal class ReadingAnchorState {
     internal var primed: Boolean = false
 
     fun reset() {
-        rowHeights.clear()
-        rowDeltas.clear()
-        pendingGrowth = 0
         glueKey = null
         glueTopPx = 0
         lastIdx = -1
@@ -123,30 +89,9 @@ internal class ReadingAnchorState {
 }
 
 /**
- * Per-row growth probe. Attach to EVERY chat row: at each measure it reports
- * the row's height delta into [ReadingAnchorState.rowDeltas]. Row heights are
- * finger-immune, so this is a pure growth signal; heights persist across
- * recycle so a re-entering row reports the change that happened while it was
- * away, and zero-height measures (recycle/prefetch artifacts) update nothing
- * — the freeze scheme's vanished-row collapse, avoided at the source.
- */
-internal fun Modifier.growthProbe(state: ReadingAnchorState, key: Any): Modifier =
-    layout { measurable, constraints ->
-        val placeable = measurable.measure(constraints)
-        if (placeable.height > 0) {
-            val prev = state.rowHeights.put(key, placeable.height)
-            if (prev != null && prev != placeable.height) {
-                state.rowDeltas[key] = (state.rowDeltas[key] ?: 0) + (placeable.height - prev)
-            }
-        }
-        layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
-    }
-
-/**
  * Attach to the chat LazyColumn. While [active] holds (reader detached, turn
  * live, adb opt-in), content-chain changes under a still viewport are
- * absorbed so the reading position never visibly moves; during drags and
- * flings the [ReadingAnchorConnection] absorbs the probed growth instead. See
+ * absorbed so the reading position never visibly moves. See
  * [ReadingAnchorState] for the design and its measured history.
  */
 internal fun Modifier.liveReadingAnchor(
@@ -167,7 +112,7 @@ internal fun Modifier.liveReadingAnchor(
             // here — compensating would pin the newest text below the fold.
             onLiveEdgeSettle()
             state.reset()
-        } else {
+        } else if (!gestureActive()) {
             // Read the layout info written by the measure above UNOBSERVED:
             // an observed layoutInfo read inside a measure lambda
             // re-invalidates on the list's every-measure layoutInfo write and
@@ -178,13 +123,6 @@ internal fun Modifier.liveReadingAnchor(
             // (T-android-scroll-isnearbottom-bug); keep the baseline, act
             // next pass.
             if (visible.isNotEmpty()) {
-                // Sum the probed deltas of the VISIBLE rows: growth below the
-                // viewport or in the prefetch band cannot disturb the reader.
-                var growth = 0
-                for (item in visible) {
-                    growth += state.rowDeltas[item.key] ?: 0
-                }
-                state.pendingGrowth = growth
                 // Last in layout order = topmost visible row = the oldest
                 // content on screen; everything below it down to the live
                 // edge glues to its top edge.
@@ -194,64 +132,52 @@ internal fun Modifier.liveReadingAnchor(
                     // Recycle/prefetch artifact: a zero-height measure of a
                     // re-entering item must never become the reference (this
                     // is what collapsed rows to nothing under the freeze).
-                } else if (gestureActive()) {
-                    // Moving frames: the connection absorbs pendingGrowth in
-                    // the input-dispatch phase, outside this measure pass.
-                } else {
-                    // Still frames: the glue-rise request owns the disturbance
-                    // (its rise covers the probed growth plus insertions and
-                    // collapses), so the probed sum is consumed here.
-                    state.pendingGrowth = 0
-                    state.rowDeltas.clear()
-                    if (!state.primed || glue.key != state.glueKey) {
-                        state.glueKey = glue.key
+                } else if (!state.primed || glue.key != state.glueKey) {
+                    state.glueKey = glue.key
+                    state.glueTopPx = top
+                    state.lastIdx = idx
+                    state.lastOff = off
+                    state.pendingDelta = 0
+                    state.primed = true
+                } else if (state.pendingDelta != 0) {
+                    // A request is in flight. The position STATE leads the
+                    // measured GEOMETRY by a pass — judge only by the glue
+                    // row's offset.
+                    val expectedOffset = -(state.lastOff + state.pendingDelta)
+                    if (glue.offset == expectedOffset) {
+                        // Applied. Judge the residual against the target held
+                        // across the apply; growth composed into the same
+                        // frame is absorbed instead of re-baselined.
+                        state.lastOff = off
+                        val rise = top - state.glueTopPx
+                        state.pendingDelta = 0
+                        if (rise != 0) {
+                            requestRise(state, listState, rise, glue.key, idx, off, top)
+                        }
+                    } else if (top != state.pendingTopPx || idx != state.lastIdx) {
+                        // The geometry moved while the request was in flight
+                        // (further growth, an external mover): the request is
+                        // stale — adopt the current geometry.
+                        state.pendingDelta = 0
                         state.glueTopPx = top
                         state.lastIdx = idx
                         state.lastOff = off
-                        state.pendingDelta = 0
-                        state.primed = true
-                    } else if (state.pendingDelta != 0) {
-                        // A request is in flight. The position STATE leads the
-                        // measured GEOMETRY by a pass (the on-device 19:46
-                        // trace: trusting the state re-requested against stale
-                        // geometry and ping-ponged ±71px) — judge only by the
-                        // glue row's offset.
-                        val expectedOffset = -(state.lastOff + state.pendingDelta)
-                        if (glue.offset == expectedOffset) {
-                            // Applied. Judge the residual against the target
-                            // held across the apply; growth composed into the
-                            // same frame is absorbed instead of re-baselined.
-                            state.lastOff = off
-                            val rise = top - state.glueTopPx
-                            state.pendingDelta = 0
-                            if (rise != 0) {
-                                requestRise(state, listState, rise, glue.key, idx, off, top)
-                            }
-                        } else if (top != state.pendingTopPx || idx != state.lastIdx) {
-                            // The geometry moved while the request was in
-                            // flight (further growth, an external mover): the
-                            // request is stale — adopt the current geometry.
-                            state.pendingDelta = 0
-                            state.glueTopPx = top
-                            state.lastIdx = idx
-                            state.lastOff = off
-                        }
-                        // else: still in flight — wait. A second request
-                        // against the lagging geometry is exactly what
-                        // oscillated on device.
+                    }
+                    // else: still in flight — wait. A second request against
+                    // the lagging geometry is exactly what oscillated on
+                    // device.
+                } else {
+                    val positionMoved = idx != state.lastIdx || off != state.lastOff
+                    state.lastIdx = idx
+                    state.lastOff = off
+                    if (positionMoved) {
+                        // A drag, fling or programmatic jump owns the
+                        // viewport — follow it; never fight it.
+                        state.glueTopPx = top
                     } else {
-                        val positionMoved = idx != state.lastIdx || off != state.lastOff
-                        state.lastIdx = idx
-                        state.lastOff = off
-                        if (positionMoved) {
-                            // A drag, fling or programmatic jump owns the
-                            // viewport — follow it; never fight it.
-                            state.glueTopPx = top
-                        } else {
-                            val rise = top - state.glueTopPx
-                            if (rise != 0) {
-                                requestRise(state, listState, rise, glue.key, idx, off, top)
-                            }
+                        val rise = top - state.glueTopPx
+                        if (rise != 0) {
+                            requestRise(state, listState, rise, glue.key, idx, off, top)
                         }
                     }
                 }
@@ -292,40 +218,5 @@ private fun requestRise(
             "ScrollReadingAnchor",
             "rise=$rise requested idx=$idx off=${off + rise} key=$glueKey",
         )
-    }
-}
-
-/**
- * Absorbs the probed growth during drags and flings. Nested-scroll callbacks
- * run in the input-dispatch phase — outside any measure pass — where
- * dispatchRawDelta's inline remeasure is legal; from inside the list's own
- * measure it is the 19:13 crash. The probed growth is finger-immune (row
- * heights never respond to the finger), so the absorption composes with a
- * drag or fling without any consumed-delta bookkeeping.
- */
-internal class ReadingAnchorConnection(
-    private val state: ReadingAnchorState,
-    private val listState: LazyListState,
-    private val active: () -> Boolean,
-) : NestedScrollConnection {
-    override fun onPostScroll(
-        consumed: Offset,
-        available: Offset,
-        source: NestedScrollSource,
-    ): Offset {
-        if (!active()) return Offset.Zero
-        val growth = state.pendingGrowth
-        if (growth != 0) {
-            state.pendingGrowth = 0
-            state.rowDeltas.clear()
-            listState.dispatchRawDelta(growth.toFloat())
-            if (ScrollDebugFlags.traceMoves) {
-                AppLogger.debug(
-                    "ScrollReadingAnchor",
-                    "gesture absorb growth=$growth",
-                )
-            }
-        }
-        return Offset.Zero
     }
 }

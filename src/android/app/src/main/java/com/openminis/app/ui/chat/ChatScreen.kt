@@ -3775,9 +3775,6 @@ fun ChatScreen(
                         (viewModel.isStreaming.value ||
                             (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
                 }
-                val readingAnchorConnection = remember(readingAnchor) {
-                    ReadingAnchorConnection(readingAnchor, listState, readingAnchorActive)
-                }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
@@ -4104,9 +4101,7 @@ fun ChatScreen(
                     modifier = Modifier
                         // [T-android-reading-anchor] Measure-frame detached-
                         // reading compensation; outermost so it wraps the
-                        // list's own measure. The connection absorbs growth
-                        // during drags/flings in the input-dispatch phase.
-                        // See ReadingAnchor.kt.
+                        // list's own measure. See ReadingAnchor.kt.
                         .liveReadingAnchor(
                             readingAnchor,
                             listState,
@@ -4130,7 +4125,6 @@ fun ChatScreen(
                         )
                         .fillMaxWidth()
                         .nestedScroll(userScrollPauseConnection)
-                        .nestedScroll(readingAnchorConnection)
                         // [T-android-chat-max-content-width] Cap the reading
                         // measure on a wide window, mirroring iOS
                         // AIChatView.maxContentWidth (900pt when the horizontal
@@ -4315,10 +4309,6 @@ fun ChatScreen(
                         val isNewestItem = item == flatItems.lastOrNull()
                         Box(
                             modifier = Modifier
-                                // [T-android-reading-anchor] Finger-immune
-                                // growth probe: the row's measured height
-                                // delta feeds the detached-reading anchor.
-                                .growthProbe(readingAnchor, item.key)
                                 .alpha(rowAlpha)
                                 .then(
                                     if (isNewestItem) {
