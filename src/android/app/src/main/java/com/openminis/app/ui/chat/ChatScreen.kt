@@ -2017,6 +2017,7 @@ fun ChatScreen(
     // streaming" bug).
     var isUserDragging by remember { mutableStateOf(false) }
     var userDragAwaitingSettle by remember { mutableStateOf(false) }
+    var isUserPressing by remember { mutableStateOf(false) }
     var dragStartedNearBottom by remember { mutableStateOf(false) }
     var manualDragLeftBottom by remember { mutableStateOf(false) }
     var dragStartIndex by remember { mutableStateOf(0) }
@@ -2027,6 +2028,16 @@ fun ChatScreen(
             // event during a scroll (Press / Cancel / Stop). String-building
             // logs here added measurable load. Gate behind a constant.
             when (interaction) {
+                is androidx.compose.foundation.interaction.PressInteraction.Press -> {
+                    // A stationary finger is still an intentional reading
+                    // gesture. Pause streaming follow until it is released.
+                    isUserPressing = true
+                    followCompletedStream = false
+                }
+                is androidx.compose.foundation.interaction.PressInteraction.Release,
+                is androidx.compose.foundation.interaction.PressInteraction.Cancel -> {
+                    isUserPressing = false
+                }
                 is androidx.compose.foundation.interaction.DragInteraction.Start -> {
                     pendingSearchMessageId = null
                     userScrolledAway = true
@@ -2169,7 +2180,7 @@ fun ChatScreen(
                 firstOffset = listState.firstVisibleItemScrollOffset,
                 totalItems = info.totalItemsCount,
                 scrolling = listState.isScrollInProgress,
-                userInteracting = isUserDragging || userDragAwaitingSettle,
+                userInteracting = isUserDragging || userDragAwaitingSettle || isUserPressing,
                 viewportStart = info.viewportStartOffset,
                 viewportEnd = info.viewportEndOffset,
                 beforePadding = info.beforeContentPadding,
@@ -3762,7 +3773,7 @@ fun ChatScreen(
                 // ReadingAnchor.kt.
                 val readingAnchorActive: () -> Boolean = {
                     ScrollDebugFlags.readingAnchorEnabled &&
-                        userScrolledAway && pendingSearchMessageId == null &&
+                        (userScrolledAway || isUserPressing) && pendingSearchMessageId == null &&
                         viewModel.isStreaming.value
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
@@ -4104,7 +4115,7 @@ fun ChatScreen(
                             listState,
                             active = readingAnchorActive,
                             gestureActive = {
-                                isUserDragging || userDragAwaitingSettle || listState.isScrollInProgress
+                                isUserPressing || isUserDragging || userDragAwaitingSettle || listState.isScrollInProgress
                             },
                             atLiveEdge = {
                                 listState.firstVisibleItemIndex == 0 &&

@@ -103,6 +103,12 @@ internal fun Modifier.liveReadingAnchor(
             state.lastTopKey = glue.key
             if (glue.size > 0) {
                 if (gestureActive()) {
+                    if (!listState.isScrollInProgress) {
+                        // A stationary press has no nested-scroll callback. Mark
+                        // the next settled frame so its growth is rebased instead
+                        // of being applied as an automatic upward push.
+                        state.suppressAfterGesture = true
+                    }
                     state.lastTopPx = top
                 } else {
                     state.pendingGrowth = 0
