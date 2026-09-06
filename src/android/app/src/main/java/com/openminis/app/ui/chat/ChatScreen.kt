@@ -3768,6 +3768,8 @@ fun ChatScreen(
                 // is handed to the viewport as one raw delta so the reading
                 // point does not jump.
                 LaunchedEffect(listState, sessionId) {
+                    var frozenOff = 0
+                    var thawOff = -1
                     // EVERY engage/release input is read inside the snapshot:
                     // the 14:22 regression read the gesture flags only in
                     // collect, so nothing re-emitted when a drag ended and the
@@ -3797,9 +3799,21 @@ fun ChatScreen(
                         // either the turn/search to end or a settled arrival
                         // at the live edge (the reveal). Releasing on
                         // gesture-start was the 14:03 yank loop.
+                        val off = listState.firstVisibleItemScrollOffset
                         if (readingFreeze.frozen) {
-                            val release = !streaming || (nearBottom && gestureIdle)
+                            // "Scroll like normal history": the instant the
+                            // user turns back toward the live edge, thaw — the
+                            // withheld tail expands ONCE here (absorbed into
+                            // the down-scroll) and the rest of the way is
+                            // native 1:1 scrolling. thawOff latches the thaw
+                            // point so the down-scroll cannot re-engage the
+                            // freeze; scrolling back up past it may.
+                            if (frozenOff - off > 12) thawOff = off
+                            frozenOff = off
+                            val release = !streaming || thawOff >= 0 ||
+                                (nearBottom && gestureIdle)
                             if (!release) return@collect
+                            thawOff = -1
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
                             readingFreeze.accumulatedPx = 0
@@ -3826,9 +3840,13 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            if (streaming && detached) {
+                            val pastThaw = thawOff < 0 ||
+                                off >= thawOff + 12
+                            if (streaming && detached && pastThaw) {
                                 readingFreeze.frozen = true
                                 readingFreeze.freezeEpoch++
+                                frozenOff = off
+                                thawOff = -1
                                 AppLogger.debug(
                                     "ScrollReadingAnchor",
                                     "engage epoch=${readingFreeze.freezeEpoch} " +
