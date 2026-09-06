@@ -3763,8 +3763,7 @@ fun ChatScreen(
                 val readingAnchorActive: () -> Boolean = {
                     ScrollDebugFlags.readingAnchorEnabled &&
                         userScrolledAway && pendingSearchMessageId == null &&
-                        (viewModel.isStreaming.value ||
-                            (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
+                        viewModel.isStreaming.value
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect

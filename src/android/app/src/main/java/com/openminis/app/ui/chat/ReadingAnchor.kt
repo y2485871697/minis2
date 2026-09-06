@@ -118,9 +118,11 @@ internal fun Modifier.liveReadingAnchor(
                         val expectedOffset = -(state.lastOff + state.pendingDelta)
                         if (glue.offset == expectedOffset) {
                             state.lastOff = off
-                            val rise = top - state.glueTopPx
                             state.pendingDelta = 0
-                            if (rise != 0) requestRise(state, listState, rise, glue.key)
+                            // The requested offset has been applied. Rebase to the
+                            // measured frame; issuing a residual correction here can
+                            // immediately reverse the same request and flicker.
+                            state.glueTopPx = top
                         } else if (top != state.pendingTopPx) {
                             state.pendingDelta = 0
                             state.glueTopPx = top
@@ -133,7 +135,13 @@ internal fun Modifier.liveReadingAnchor(
                         state.lastOff = off
                         if (moved) state.glueTopPx = top else {
                             val rise = top - state.glueTopPx
-                            if (rise != 0) requestRise(state, listState, rise, glue.key)
+                            if (rise > 0) {
+                                requestRise(state, listState, rise, glue.key)
+                            } else if (rise < 0) {
+                                // Shrink/jitter is not stream growth. Rebase without
+                                // moving the reader to avoid an oscillating correction.
+                                state.glueTopPx = top
+                            }
                         }
                     }
                 }
@@ -144,6 +152,7 @@ internal fun Modifier.liveReadingAnchor(
 }
 
 private fun requestRise(state: ReadingAnchorState, listState: LazyListState, rise: Int, key: Any?) {
+    if (rise <= 0) return
     if (listState.isScrollInProgress) {
         state.glueTopPx += rise
         return
