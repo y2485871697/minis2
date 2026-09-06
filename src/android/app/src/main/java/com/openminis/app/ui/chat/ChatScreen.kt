@@ -2029,14 +2029,18 @@ fun ChatScreen(
             // logs here added measurable load. Gate behind a constant.
             when (interaction) {
                 is androidx.compose.foundation.interaction.PressInteraction.Press -> {
-                    // A stationary finger is still an intentional reading
-                    // gesture. Pause streaming follow until it is released.
-                    isUserPressing = true
+                    // Do not use PressInteraction for the held-finger gate.
+                    // Child clickables can emit Cancel while the pointer is
+                    // still down (for example when drag slop is crossed),
+                    // which would prematurely re-enable streaming follow.
+                    // The LazyColumn pointer listener below owns the complete
+                    // down -> up/cancel lifetime instead.
                     followCompletedStream = false
                 }
                 is androidx.compose.foundation.interaction.PressInteraction.Release,
                 is androidx.compose.foundation.interaction.PressInteraction.Cancel -> {
-                    isUserPressing = false
+                    // The direct pointer listener is the sole writer of
+                    // isUserPressing; PressInteraction may end early.
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Start -> {
                     pendingSearchMessageId = null
