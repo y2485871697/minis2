@@ -93,6 +93,14 @@ jobs:
           path: src/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
+      - name: Upload R8 mapping
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenMinis-mapping
+          path: src/android/app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: ignore
+
       - name: Publish bare APK to rolling release
         env:
           GH_TOKEN: ${{ github.token }}

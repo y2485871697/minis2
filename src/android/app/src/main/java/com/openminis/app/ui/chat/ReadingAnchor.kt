@@ -5,7 +5,6 @@ import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.layout
 import com.openminis.app.logging.AppLogger
-import kotlin.math.roundToInt
 
 /**
  * Measure-frame reading anchor for detached reading during a live turn.
@@ -58,13 +57,20 @@ import kotlin.math.roundToInt
  *  - zero-height measures (recycle/prefetch artifacts) and key changes are
  *    re-baselined, never read as growth.
  *
- * dispatchRawDelta rather than requestScrollToItem: it neither enters the
- * scroll mutator mutex nor cancels an in-progress gesture ("Any scroll in
- * progress will be cancelled" — requestScrollToItem's contract), so deltas
- * compose with a held finger, and it keeps LazyColumn's key-based position
- * maintenance intact. Positive delta = viewport toward older content =
- * exactly the direction that undoes a top-edge rise (measured 04:47 anchor
- * trace: growth=N → +N consumed, snap back).
+ * requestScrollToItem — NOT dispatchRawDelta — applies the correction.
+ * dispatchRawDelta force-remeasures the list synchronously, and from inside
+ * the list's own measure pass that trips Compose's reentrancy guard
+ * ("performMeasureAndLayout called during measure layout" — the measured
+ * 19:13 crash) on top of the reentrant measure cascade d746a60 measured as
+ * a visible flash. requestScrollToItem only writes the scroll position and
+ * invalidates the measurement; the follow-up measure pass of the SAME frame
+ * applies it, so the correction stays zero-lag. Because it cancels any
+ * in-progress scroll ("Any scroll in progress will be cancelled"), the pass
+ * skips compensation while isScrollInProgress — a drag or fling owns the
+ * viewport and the anchor re-baselines instead of fighting it. Positive
+ * correction = viewport toward older content = exactly the direction that
+ * undoes a top-edge rise (measured 04:47 anchor trace: growth=N → +N,
+ * snap back).
  */
 internal class ReadingAnchorState {
     /** Key of the row the reading position glues to. */
@@ -141,7 +147,7 @@ internal fun Modifier.liveReadingAnchor(
                     state.lastOff = off
                     val rise = top - state.glueTopPx
                     if (rise != 0) {
-                        dispatchRise(state, listState, rise, glue.key, idx, off)
+                        requestRise(state, listState, rise, glue.key, idx, off)
                     } else {
                         state.pendingDelta = 0
                     }
@@ -157,7 +163,7 @@ internal fun Modifier.liveReadingAnchor(
                     } else {
                         val rise = top - state.glueTopPx
                         if (rise != 0) {
-                            dispatchRise(state, listState, rise, glue.key, idx, off)
+                            requestRise(state, listState, rise, glue.key, idx, off)
                         }
                     }
                 }
@@ -169,7 +175,7 @@ internal fun Modifier.liveReadingAnchor(
     layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
 }
 
-private fun dispatchRise(
+private fun requestRise(
     state: ReadingAnchorState,
     listState: LazyListState,
     rise: Int,
@@ -177,20 +183,24 @@ private fun dispatchRise(
     idx: Int,
     off: Int,
 ) {
-    val consumed = listState.dispatchRawDelta(rise.toFloat()).roundToInt()
-    if (consumed == 0) {
-        // Clamped at a list boundary (e.g. a collapse larger than the
-        // reading depth lands at the live edge): adopt the applied geometry.
-        state.glueTopPx = state.glueTopPx + rise
+    if (listState.isScrollInProgress) {
+        // requestScrollToItem cancels any scroll in progress — a drag or
+        // fling owns the viewport. Adopt the moved geometry instead of
+        // fighting it; the anchor re-baselines through the follow-up passes.
         state.pendingDelta = 0
-    } else {
-        // Target stays; the follow-up pass re-judges at the applied position.
-        state.pendingDelta = consumed
+        state.glueTopPx += rise
+        return
     }
+    // Zero-lag write: the position lands at the follow-up measure pass of
+    // THIS frame. A boundary clamp (rise larger than the remaining scroll
+    // range — e.g. a collapse that lands the reader at the live edge) shows
+    // up next pass as a position mismatch and re-baselines there.
+    listState.requestScrollToItem(idx, off + rise)
+    state.pendingDelta = rise
     if (ScrollDebugFlags.traceMoves) {
         AppLogger.debug(
             "ScrollReadingAnchor",
-            "rise=$rise consumed=$consumed key=$glueKey firstIdx=$idx firstOff=$off",
+            "rise=$rise requested idx=$idx off=${off + rise} key=$glueKey",
         )
     }
 }
