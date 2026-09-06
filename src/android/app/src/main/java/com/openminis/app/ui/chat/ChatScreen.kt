@@ -3803,6 +3803,15 @@ fun ChatScreen(
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
                             readingFreeze.accumulatedPx = 0
+                            if (nearBottom) {
+                                // Arrived back at the live edge: resume follow.
+                                // Mirrors the non-streaming drag-Stop clear,
+                                // which never fires during a turn — without
+                                // this the FABs stayed on after the user
+                                // returned to the bottom.
+                                userScrolledAway = false
+                                manualDragLeftBottom = false
+                            }
                             if (accumulated > 0 && !nearBottom && pendingSearchMessageId == null) {
                                 listState.dispatchRawDelta(accumulated.toFloat())
                                 AppLogger.debug(
