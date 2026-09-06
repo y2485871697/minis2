@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-release:
@@ -92,3 +92,11 @@ jobs:
           name: OpenMinis-context-compression-stable
           path: src/android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
+
+      - name: Publish bare APK to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK_PATH=$(find src/android/app/build/outputs/apk/release -name '*.apk' -print -quit)
+          test -n "$APK_PATH"
+          gh release upload ci-latest "$APK_PATH" --clobber --repo "$GITHUB_REPOSITORY" ||             gh release create ci-latest "$APK_PATH" --prerelease --title "Latest CI build"               --notes "Rolling latest signed APK from android-release.yml" --repo "$GITHUB_REPOSITORY"
