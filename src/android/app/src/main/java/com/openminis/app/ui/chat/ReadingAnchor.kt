@@ -29,6 +29,7 @@ internal class ReadingAnchorState {
     internal var lastOff: Int = -1
     internal var pendingDelta: Int = 0
     internal var pendingTopPx: Int = 0
+    internal var suppressAfterGesture: Boolean = false
     internal var primed: Boolean = false
     internal var lastTopPx: Int = 0
     internal var lastTopKey: Any? = null
@@ -43,6 +44,7 @@ internal class ReadingAnchorState {
         lastOff = -1
         pendingDelta = 0
         pendingTopPx = 0
+        suppressAfterGesture = false
         primed = false
         lastTopPx = 0
         lastTopKey = null
@@ -113,7 +115,17 @@ internal fun Modifier.liveReadingAnchor(
                         state.lastIdx = idx
                         state.lastOff = off
                         state.pendingDelta = 0
+                        state.suppressAfterGesture = false
                         state.primed = true
+                    } else if (state.suppressAfterGesture) {
+                        // User scrolling owns the offset. Discard growth observed
+                        // during the drag and rebase after it settles so the anchor
+                        // never fights the finger with a second delta.
+                        state.suppressAfterGesture = false
+                        state.pendingDelta = 0
+                        state.glueTopPx = top
+                        state.lastIdx = idx
+                        state.lastOff = off
                     } else if (state.pendingDelta != 0) {
                         val expectedOffset = -(state.lastOff + state.pendingDelta)
                         if (glue.offset == expectedOffset) {
@@ -174,6 +186,16 @@ internal class ReadingAnchorConnection(
 ) : NestedScrollConnection {
     override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
         if (!active()) return Offset.Zero
+        if (source == NestedScrollSource.UserInput) {
+            // Do not dispatch a second raw delta while the user is dragging. The
+            // streamed row may grow underneath the finger; it is rebased once the
+            // gesture settles instead of producing visible jitter.
+            state.pendingGrowth = 0
+            state.rowDeltas.clear()
+            state.pendingDelta = 0
+            state.suppressAfterGesture = true
+            return Offset.Zero
+        }
         val growth = state.pendingGrowth
         if (growth != 0) {
             state.pendingGrowth = 0
