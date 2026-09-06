@@ -4171,6 +4171,29 @@ fun ChatScreen(
                             // index) rather than jumping backward.
                             reverseLayout = true,
                         )
+                        // LazyListState.interactionSource does not reliably
+                        // expose a stationary press. Observe the pointer stream
+                        // directly without consuming it so a held finger pauses
+                        // streaming follow until the corresponding up/cancel.
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(
+                                    requireUnconsumed = false,
+                                    pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                                )
+                                isUserPressing = true
+                                try {
+                                    while (true) {
+                                        val event = awaitPointerEvent(
+                                            androidx.compose.ui.input.pointer.PointerEventPass.Final,
+                                        )
+                                        if (event.changes.none { it.pressed }) break
+                                    }
+                                } finally {
+                                    isUserPressing = false
+                                }
+                            }
+                        }
                         // T29 dismiss-on-tap spy. Only active while the slash
                         // popup is showing. awaitFirstDown(requireUnconsumed=false,
                         // pass=Initial) lets us see the tap *before* any child
