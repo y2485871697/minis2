@@ -3803,16 +3803,21 @@ fun ChatScreen(
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
                             readingFreeze.accumulatedPx = 0
-                            if (nearBottom) {
-                                // Arrived back at the live edge: resume follow.
-                                // Mirrors the non-streaming drag-Stop clear,
-                                // which never fires during a turn — without
-                                // this the FABs stayed on after the user
-                                // returned to the bottom.
+                            // Flush at the live edge (0,0) — and ONLY there —
+                            // resumes follow and hides the FABs. Settling
+                            // merely INSIDE the near-bottom threshold must not
+                            // clear the intent: that re-armed the bottom pin
+                            // and yanked the reader flush ("instant snap to
+                            // bottom" while streaming). For those landings the
+                            // expansion is compensated instead so the reading
+                            // point holds and the tail waits below the fold.
+                            val atLiveEdge = listState.firstVisibleItemIndex == 0 &&
+                                listState.firstVisibleItemScrollOffset == 0
+                            if (atLiveEdge) {
                                 userScrolledAway = false
                                 manualDragLeftBottom = false
                             }
-                            if (accumulated > 0 && !nearBottom && pendingSearchMessageId == null) {
+                            if (accumulated > 0 && !atLiveEdge && pendingSearchMessageId == null) {
                                 listState.dispatchRawDelta(accumulated.toFloat())
                                 AppLogger.debug(
                                     "ScrollReadingAnchor",
