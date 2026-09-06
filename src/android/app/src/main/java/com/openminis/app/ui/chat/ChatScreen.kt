@@ -3676,61 +3676,74 @@ fun ChatScreen(
                     (if (canResume && !isStreaming && error == null &&
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
-                // A user can remain inside the currently generating assistant
-                // row after leaving the live edge. reverseLayout then keeps the
-                // growing row's clipped edge anchored and moves the reader's
-                // viewport a little on every remeasure. Compensate only the
-                // measured growth of that one visible row in the real list
-                // state. This keeps the reading position stable without moving
-                // the whole LazyColumn through a layout-time offset.
+                // Once the user leaves the live edge, preserve the item and
+                // pixel offset they are reading. With reverseLayout, growth of
+                // the live row can otherwise move the whole viewport even when
+                // the user is looking at that row or at older history. The
+                // anchor is based on a stable LazyColumn key, so it also works
+                // when the growing row is partially clipped and is no longer
+                // the first visible item.
                 LaunchedEffect(listState, sessionId, searchLeadingRows) {
-                    var previousKey: Any? = null
-                    var previousSize = 0
-                    var previousOffset = 0
+                    var anchorKey: Any? = null
+                    var anchorOffset = 0
+                    var wasPaused = false
+
                     snapshotFlow {
                         val info = listState.layoutInfo
-                        val first = info.visibleItemsInfo.firstOrNull { it.index == listState.firstVisibleItemIndex }
-                        val row = first?.let {
-                            flatItems.getOrNull(flatItems.size - 1 - (it.index - searchLeadingRows))
-                                ?.takeIf { item -> item.key == it.key }
+                        val visible = info.visibleItemsInfo.map {
+                            Triple(it.index, it.key, it.offset)
                         }
-                        val live = when (row) {
-                            is FlatChatItem.AssistantText -> row.isStreaming
-                            is FlatChatItem.AssistantMarkdownBlock -> row.messageIsStreaming
-                            is FlatChatItem.AssistantThinking -> row.messageIsStreaming && row.isLastBlockOverall
-                            is FlatChatItem.AssistantLegacyContent -> row.isStreaming
-                            else -> false
-                        }
-                        Triple(first, live, viewModel.isStreaming.value)
-                    }.collect { (first, live, streaming) ->
-                        if (first == null || !live || !streaming ||
-                            !userScrolledAway || isUserDragging || userDragAwaitingSettle
-                        ) {
-                            previousKey = first?.key
-                            previousSize = first?.size ?: 0
-                            previousOffset = listState.firstVisibleItemScrollOffset
+                        Triple(
+                            visible,
+                            Triple(
+                                viewModel.isStreaming.value,
+                                userScrolledAway,
+                                isUserDragging,
+                            ),
+                            Triple(userDragAwaitingSettle, listState.isScrollInProgress, Unit),
+                        )
+                    }.collect { (visible, status, motion) ->
+                        val streaming = status.first
+                        val detached = status.second
+                        val dragging = status.third
+                        val awaitingSettle = motion.first
+                        val scrolling = motion.second
+                        val paused = detached && !dragging && !awaitingSettle && !scrolling
+
+                        if (!paused || !streaming) {
+                            anchorKey = null
+                            wasPaused = false
                             return@collect
                         }
-                        if (first.key != previousKey ||
-                            listState.firstVisibleItemScrollOffset != previousOffset
-                        ) {
-                            previousKey = first.key
-                            previousSize = first.size
-                            previousOffset = listState.firstVisibleItemScrollOffset
+
+                        // A drag/fling has just settled. Establish the new
+                        // reading position before considering any layout drift.
+                        if (!wasPaused || anchorKey == null) {
+                            val first = visible.firstOrNull()
+                            anchorKey = first?.second
+                            anchorOffset = first?.third ?: 0
+                            wasPaused = true
                             return@collect
                         }
-                        val growth = first.size - previousSize
-                        previousSize = first.size
-                        if (growth > 0) {
-                            // Wait until Compose has committed this measurement,
-                            // then apply one correction for this row only.
-                            withFrameNanos { }
-                            if (viewModel.isStreaming.value &&
-                                userScrolledAway && !isUserDragging && !userDragAwaitingSettle
-                            ) {
-                                listState.dispatchRawDelta(growth.toFloat())
-                                previousOffset = listState.firstVisibleItemScrollOffset
-                            }
+
+                        val anchor = visible.firstOrNull { it.second == anchorKey }
+                        if (anchor == null) {
+                            // The anchor left the measured window. Re-anchor to
+                            // the current first item rather than jumping across
+                            // an unmeasured range.
+                            val first = visible.firstOrNull()
+                            anchorKey = first?.second
+                            anchorOffset = first?.third ?: 0
+                            return@collect
+                        }
+
+                        val drift = anchor.third - anchorOffset
+                        if (kotlin.math.abs(drift) > 1) {
+                            // Positive drift means the content was pushed down;
+                            // the same positive raw delta moves it back up.
+                            // Keep the original anchorOffset so the next layout
+                            // pass verifies that the correction actually landed.
+                            listState.dispatchRawDelta(drift.toFloat())
                         }
                     }
                 }
