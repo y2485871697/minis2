@@ -4129,7 +4129,18 @@ fun ChatScreen(
                                 // The freeze's release-at-live-edge rule: the
                                 // reader who scrolled back to the bottom wants
                                 // the stream — resume follow.
-                                if (userScrolledAway) {
+                                // A growing row can transiently report the
+                                // live edge during an active drag/press. Do
+                                // not clear the detached flag in that frame:
+                                // the next UserInput delta would immediately
+                                // re-arm it, creating the observed true/false
+                                // flip-flop and re-enabling auto-follow.
+                                if (userScrolledAway &&
+                                    !isUserPressing &&
+                                    !isUserDragging &&
+                                    !userDragAwaitingSettle &&
+                                    !listState.isScrollInProgress
+                                ) {
                                     userScrolledAway = false
                                     manualDragLeftBottom = false
                                 }
