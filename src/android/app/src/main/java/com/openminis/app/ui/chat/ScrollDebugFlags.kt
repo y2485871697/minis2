@@ -92,7 +92,7 @@ object ScrollDebugFlags {
             trace = "trace" in tokens || "all" in tokens,
             frames = "frames" in tokens || "all" in tokens,
             pinEnabled = "nopin" !in tokens,
-            anchorEnabled = "noanchor" !in tokens,
+            anchorEnabled = "anchor" in tokens || "all" in tokens
             trailingEnabled = "notrailing" !in tokens,
             reserveEnabled = "noreserve" !in tokens,
         )

@@ -3842,7 +3842,7 @@ fun ChatScreen(
                         } else {
                             val pastThaw = thawOff < 0 ||
                                 off >= thawOff + 12
-                            if (streaming && detached && pastThaw) {
+                            if (streaming && detached && pastThaw && ScrollDebugFlags.readingAnchorEnabled) {
                                 readingFreeze.frozen = true
                                 readingFreeze.freezeEpoch++
                                 frozenOff = off
