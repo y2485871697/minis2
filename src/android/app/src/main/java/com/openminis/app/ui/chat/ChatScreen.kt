@@ -3775,13 +3775,24 @@ fun ChatScreen(
                             pendingSearchMessageId == null,
                         )
                     }.collect { (streaming, nearBottom, noSearch) ->
-                        val shouldFreeze = streaming && !nearBottom && noSearch
-                        if (shouldFreeze == readingFreeze.frozen) return@collect
-                        if (!shouldFreeze) {
+                        // Hysteresis on purpose: NEAR-BOTTOM ALONE MUST NOT
+                        // RELEASE. It flips true while the user is still
+                        // dragging toward the live edge, and releasing then
+                        // fired the +acc raw delta mid-gesture — the measured
+                        // 14:03 loop yanked the reader back to the frozen
+                        // position on every drag ("pinned in place"). Release
+                        // only when the gesture has fully settled at the edge,
+                        // or the turn/search ended; engage only on a settled
+                        // gesture too, so the anchor captures a rest position.
+                        val gestureIdle = !isUserDragging && !userDragAwaitingSettle &&
+                            !listState.isScrollInProgress
+                        if (readingFreeze.frozen) {
+                            val release = !streaming || !noSearch || (nearBottom && gestureIdle)
+                            if (!release) return@collect
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
                             readingFreeze.accumulatedPx = 0
-                            if (accumulated > 0 && pendingSearchMessageId == null) {
+                            if (accumulated > 0 && !nearBottom && pendingSearchMessageId == null) {
                                 listState.dispatchRawDelta(accumulated.toFloat())
                                 AppLogger.debug(
                                     "ScrollReadingAnchor",
@@ -3790,7 +3801,10 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            readingFreeze.frozen = true
+                            if (streaming && !nearBottom && noSearch && gestureIdle) {
+                                readingFreeze.frozen = true
+                                readingFreeze.freezeEpoch++
+                            }
                         }
                     }
                 }

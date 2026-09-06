@@ -27,12 +27,15 @@ import androidx.compose.ui.layout.layout
 internal class ReadingFreezeState {
     var frozen by mutableStateOf(false)
     var accumulatedPx by mutableIntStateOf(0)
+
+    /** Bumped on every freeze start so stale anchors never survive a release. */
+    var freezeEpoch by mutableIntStateOf(0)
 }
 
 /** Per-row measurement bookkeeping; one instance per live row via remember(key). */
 internal class RowFreezeCtl {
     var anchorPx = -1
-    var lastLivePx = -1
+    var anchorEpoch = -1
 }
 
 /**
@@ -48,14 +51,14 @@ internal fun Modifier.liveRowReadingFreeze(
 ): Modifier = clipToBounds().layout { measurable, constraints ->
     val placeable = measurable.measure(constraints)
     if (active && state.frozen) {
-        if (ctl.anchorPx < 0) {
-            ctl.anchorPx = if (ctl.lastLivePx > 0) ctl.lastLivePx else placeable.height
+        if (ctl.anchorEpoch != state.freezeEpoch) {
+            ctl.anchorEpoch = state.freezeEpoch
+            ctl.anchorPx = placeable.height
         }
         state.accumulatedPx = placeable.height - ctl.anchorPx
         layout(placeable.width, ctl.anchorPx) { placeable.placeRelative(0, 0) }
     } else {
-        ctl.anchorPx = -1
-        ctl.lastLivePx = placeable.height
+        ctl.anchorEpoch = -1
         layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
     }
 }
