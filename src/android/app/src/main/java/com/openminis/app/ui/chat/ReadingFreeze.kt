@@ -51,12 +51,21 @@ internal fun Modifier.liveRowReadingFreeze(
 ): Modifier = clipToBounds().layout { measurable, constraints ->
     val placeable = measurable.measure(constraints)
     if (active && state.frozen) {
-        if (ctl.anchorEpoch != state.freezeEpoch) {
+        // A zero-height measure is a disposal/prefetch artifact (the item
+        // re-entering the viewport after LazyColumn recycled it measured
+        // empty); capturing it as the anchor collapsed the whole streaming
+        // row to nothing — the reader dragged back to a VANISHED message.
+        // Only a real measurement may (re)capture the anchor.
+        if (placeable.height > 0 && ctl.anchorEpoch != state.freezeEpoch) {
             ctl.anchorEpoch = state.freezeEpoch
             ctl.anchorPx = placeable.height
         }
-        state.accumulatedPx = placeable.height - ctl.anchorPx
-        layout(placeable.width, ctl.anchorPx) { placeable.placeRelative(0, 0) }
+        if (ctl.anchorPx > 0) {
+            state.accumulatedPx = placeable.height - ctl.anchorPx
+            layout(placeable.width, ctl.anchorPx) { placeable.placeRelative(0, 0) }
+        } else {
+            layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
+        }
     } else {
         ctl.anchorEpoch = -1
         layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
