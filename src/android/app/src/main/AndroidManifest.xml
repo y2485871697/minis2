@@ -194,6 +194,7 @@
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
+            android:screenOrientation="portrait"
             android:theme="@style/Theme.Minis"
             android:windowSoftInputMode="adjustResize">
             <!-- T-android-dynamic-app-icon: LAUNCHER intent-filter moved
