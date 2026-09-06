@@ -103,13 +103,22 @@ object ScrollDebugFlags {
  * One layout observation of the chat LazyColumn, logged verbatim by the
  * `frames` switch. Deliberately flat and printable so the log line can be
  * diffed line-by-line against a screen recording.
+ *
+ * `anchor*` describes the row the scroll position glues (index equal to
+ * firstVisibleItemIndex); `low*` describes the first-listed visible item,
+ * which during a live-edge insertion can be a lower, partially clipped row
+ * rather than the anchor. Measured convention: an item's [offset] field
+ * equals minus firstVisibleItemScrollOffset whenever the item IS the anchor.
  */
 internal data class ScrollFrameSnapshot(
-    val firstIdx: Int,
-    val firstOff: Int,
-    val firstKey: String,
-    val firstItemOffset: Int,
-    val firstItemSize: Int,
+    val anchorIdx: Int,
+    val anchorOff: Int,
+    val anchorKey: String,
+    val anchorOffset: Int,
+    val anchorSize: Int,
+    val lowIdx: Int,
+    val lowKey: String,
+    val lowOffset: Int,
     val viewportStart: Int,
     val viewportEnd: Int,
     val beforePadding: Int,
@@ -120,7 +129,8 @@ internal data class ScrollFrameSnapshot(
     val detached: Boolean,
 ) {
     override fun toString(): String =
-        "firstIdx=$firstIdx firstOff=$firstOff item(key=$firstKey offset=$firstItemOffset size=$firstItemSize) " +
+        "anchor(idx=$anchorIdx off=$anchorOff key=$anchorKey offset=$anchorOffset size=$anchorSize) " +
+            "low(idx=$lowIdx key=$lowKey offset=$lowOffset) " +
             "viewport=[$viewportStart,$viewportEnd] pad=[before=$beforePadding,after=$afterPadding] " +
             "total=$totalItems inProgress=$inProgress streaming=$streaming detached=$detached"
 }

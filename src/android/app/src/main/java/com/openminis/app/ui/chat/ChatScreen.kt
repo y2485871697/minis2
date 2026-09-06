@@ -2185,24 +2185,32 @@ fun ChatScreen(
     }
 
     // [T-android-scroll-diagnosis] One snapshot per layout change while the
-    // adb switch is on. `firstOff` (firstVisibleItemScrollOffset) and the
-    // first item's raw `offset` are printed side by side: their relationship
-    // is the coordinate convention every correction depends on, and it is
-    // exactly what was assumed rather than measured in the slide/flicker fix
-    // loop. Also exposes beforeContentPadding so a padding-driven drift
-    // (IME / bottomReserve) is recognizable as an equal-and-opposite offset
-    // shift with no scroll call anywhere.
+    // adb switch is on. `anchor` is the row the scroll position actually
+    // glues (index == firstVisibleItemIndex); `low` is the first-listed
+    // visible item, which is NOT always the anchor — the 12:17 logcat caught
+    // a frame right after a live-edge insertion where the two diverged
+    // (offset=-139 vs firstOff=0), so both are printed. Their offset/off
+    // relation is the measured coordinate convention (offset = -firstOff)
+    // that every correction primitive depends on. beforeContentPadding is
+    // exposed so a padding-driven drift (IME / bottomReserve) is
+    // recognizable as an equal-and-opposite offset shift with no scroll
+    // call anywhere.
     LaunchedEffect(listState) {
         snapshotFlow {
             val info = listState.layoutInfo
             if (!ScrollDebugFlags.frameSnapshots) return@snapshotFlow null
-            val first = info.visibleItemsInfo.firstOrNull()
+            val anchor = info.visibleItemsInfo
+                .firstOrNull { it.index == listState.firstVisibleItemIndex }
+            val low = info.visibleItemsInfo.firstOrNull()
             ScrollFrameSnapshot(
-                firstIdx = listState.firstVisibleItemIndex,
-                firstOff = listState.firstVisibleItemScrollOffset,
-                firstKey = first?.key?.toString() ?: "-",
-                firstItemOffset = first?.offset ?: Int.MIN_VALUE,
-                firstItemSize = first?.size ?: 0,
+                anchorIdx = listState.firstVisibleItemIndex,
+                anchorOff = listState.firstVisibleItemScrollOffset,
+                anchorKey = anchor?.key?.toString() ?: "-",
+                anchorOffset = anchor?.offset ?: Int.MIN_VALUE,
+                anchorSize = anchor?.size ?: 0,
+                lowIdx = low?.index ?: -1,
+                lowKey = low?.key?.toString() ?: "-",
+                lowOffset = low?.offset ?: Int.MIN_VALUE,
                 viewportStart = info.viewportStartOffset,
                 viewportEnd = info.viewportEndOffset,
                 beforePadding = info.beforeContentPadding,
@@ -3744,98 +3752,119 @@ fun ChatScreen(
                     (if (canResume && !isStreaming && error == null &&
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
-                // Once the user leaves the live edge, preserve the item and
-                // pixel offset they are reading. With reverseLayout, growth of
-                // the live row can otherwise move the whole viewport even when
-                // the user is looking at that row or at older history. The
-                // anchor is based on a stable LazyColumn key, so it also works
-                // when the growing row is partially clipped and is no longer
-                // the first visible item.
+                // [T-android-reading-anchor] Once the user detaches during a
+                // live turn, hold the reading point still while the streaming
+                // row keeps growing. Measured on-device (12:17 logcat): the
+                // scroll position glues the first visible row's START edge —
+                // firstOff and that row's offset stay frozen through 1000+px
+                // of growth — so the row's whole interior slides up under the
+                // reader. The drift to compensate is therefore the row's SIZE
+                // growth; the row's offset can never drift on its own, and an
+                // offset detector only sees this corrector's own writes, which
+                // is exactly the two-controller fight that produced the
+                // flicker loop (and why the offset-only build compensated
+                // nothing). One controller, one signal:
+                //
+                //   eligible = detached ∧ streaming ∧ no gesture ∧ the
+                //              firstIdx row is a live (growing) row;
+                //   correction = one coalesced FORWARD raw delta of +growth
+                //              per frame, applied at the frame boundary and
+                //              re-baselined. Forward is the measured drag
+                //              direction (arm y>0 ⇔ firstOff↑) — content
+                //              sliding UP by Δ needs a +Δ scroll to come back
+                //              DOWN under the reader.
+                //
+                // When the growing live row is not the firstIdx row (the user
+                // reads older history), everything the reader sees is glued
+                // and no correction is due — the 11:03 session proved that
+                // window stable, so growth below the glue edge is ignored.
                 LaunchedEffect(listState, sessionId, searchLeadingRows) {
-                    var anchorKey: Any? = null
-                    var anchorOffset = 0
-                    var wasPaused = false
+                    var previousSize = 0
+                    var tracked = false
                     var correctionPending = false
 
-                    snapshotFlow {
+                    fun growingFirstRow(): androidx.compose.foundation.lazy.LazyListItemInfo? {
                         val info = listState.layoutInfo
-                        val visible = info.visibleItemsInfo.map {
-                            Triple(it.index, it.key, it.offset)
+                        val first = info.visibleItemsInfo
+                            .firstOrNull { it.index == listState.firstVisibleItemIndex }
+                            ?: return null
+                        val row = flatItems.getOrNull(
+                            flatItems.size - 1 - (first.index - searchLeadingRows),
+                        )?.takeIf { item -> item.key == first.key } ?: return null
+                        val live = when (row) {
+                            is FlatChatItem.AssistantText -> row.isStreaming
+                            is FlatChatItem.AssistantMarkdownBlock -> row.messageIsStreaming
+                            is FlatChatItem.AssistantThinking -> row.messageIsStreaming && row.isLastBlockOverall
+                            is FlatChatItem.AssistantLegacyContent -> row.isStreaming
+                            else -> false
                         }
+                        return if (live) first else null
+                    }
+
+                    snapshotFlow {
                         Triple(
-                            visible,
-                            Triple(
-                                viewModel.isStreaming.value,
-                                userScrolledAway,
-                                isUserDragging,
-                            ),
-                            Triple(userDragAwaitingSettle, listState.isScrollInProgress, Unit),
+                            growingFirstRow(),
+                            viewModel.isStreaming.value,
+                            // Every eligibility input is read HERE so a state
+                            // change re-emits and re-baselines; reading them
+                            // only in collect would miss a gesture that starts
+                            // without a layout change.
+                            userScrolledAway && pendingSearchMessageId == null &&
+                                !isUserDragging && !userDragAwaitingSettle &&
+                                !listState.isScrollInProgress,
                         )
-                    }.collect { (visible, status, motion) ->
-                        val streaming = status.first
-                        val detached = status.second
-                        val dragging = status.third
-                        val awaitingSettle = motion.first
-                        val scrolling = motion.second
-                        val paused = detached && !dragging && !awaitingSettle && !scrolling
-
-                        if (!paused || !streaming) {
-                            anchorKey = null
-                            wasPaused = false
-                            return@collect
-                        }
-
-                        // A drag/fling has just settled. Establish the new
-                        // reading position before considering any layout drift.
-                        if (!wasPaused || anchorKey == null) {
-                            val first = visible.firstOrNull()
-                            anchorKey = first?.second
-                            anchorOffset = first?.third ?: 0
-                            wasPaused = true
-                            return@collect
-                        }
-
-                        val anchor = visible.firstOrNull { it.second == anchorKey }
-                        if (anchor == null) {
-                            // The anchor left the measured window. Re-anchor to
-                            // the current first item rather than jumping across
-                            // an unmeasured range.
-                            val first = visible.firstOrNull()
-                            anchorKey = first?.second
-                            anchorOffset = first?.third ?: 0
-                            return@collect
-                        }
-
-                        val drift = anchor.third - anchorOffset
-                        if (kotlin.math.abs(drift) > 1 && !correctionPending) {
-                            // Coalesce all size changes committed before the
-                            // next frame. Calling dispatchRawDelta here made
-                            // every measurement trigger another measurement,
-                            // which was visible as a flash on some devices.
-                            correctionPending = true
-                            withFrameNanos { }
-                            if (ScrollDebugFlags.readingAnchorEnabled &&
-                                viewModel.isStreaming.value &&
-                                userScrolledAway && !isUserDragging &&
-                                !userDragAwaitingSettle && !listState.isScrollInProgress
-                            ) {
-                                val current = listState.layoutInfo.visibleItemsInfo
-                                    .firstOrNull { it.key == anchorKey }
-                                if (current != null &&
-                                    kotlin.math.abs(current.offset - anchorOffset) > 1
-                                ) {
-                                    // One non-animated anchor request per
-                                    // frame; this does not create a scroll
-                                    // animation or a raw-delta feedback loop.
-                                    tracedRequestScrollToItem(
-                                        "READING-ANCHOR drift=$drift",
-                                        current.index,
-                                        anchorOffset,
-                                    )
-                                }
-                            }
+                    }.collect { (first, streaming, detached) ->
+                        if (first == null || !streaming || !detached) {
+                            tracked = false
                             correctionPending = false
+                            return@collect
                         }
+                        if (correctionPending) return@collect
+                        if (!tracked) {
+                            previousSize = first.size
+                            tracked = true
+                            return@collect
+                        }
+                        val growth = first.size - previousSize
+                        if (growth <= 0) {
+                            previousSize = first.size
+                            return@collect
+                        }
+                        // Coalesce every size change committed before the
+                        // next frame into ONE correction, applied outside the
+                        // measurement pass — dispatching synchronously here
+                        // re-enters measure (the d746a60 flash).
+                        correctionPending = true
+                        withFrameNanos { }
+                        // The frame boundary is also where the finger can
+                        // have landed; re-derive every eligibility input
+                        // before mutating the viewport.
+                        val stillEligible = viewModel.isStreaming.value &&
+                            userScrolledAway && pendingSearchMessageId == null &&
+                            !isUserDragging && !userDragAwaitingSettle &&
+                            !listState.isScrollInProgress
+                        val current = growingFirstRow()
+                        if (current != null && current.key == first.key && stillEligible) {
+                            val pending = current.size - previousSize
+                            if (pending > 0 && ScrollDebugFlags.readingAnchorEnabled) {
+                                val consumed = listState.dispatchRawDelta(pending.toFloat())
+                                AppLogger.debug(
+                                    "ScrollReadingAnchor",
+                                    "growth=$pending consumed=${consumed.toInt()} size=${current.size} " +
+                                        "firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+                                )
+                            }
+                            // Re-baseline to the post-apply measurement even
+                            // when the ablation gate skipped the delta, so a
+                            // mid-turn toggle never replays accumulated growth.
+                            previousSize = current.size
+                        } else {
+                            // Row identity changed (block handoff / key swap)
+                            // or eligibility lapsed: never read a cross-row
+                            // size difference as growth.
+                            tracked = false
+                        }
+                        correctionPending = false
                     }
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
