@@ -3755,20 +3755,14 @@ fun ChatScreen(
                     ) 1 else 0)
                 // [T-android-reading-anchor] The reader-detached position
                 // keeper. While a turn is live and the user has detached from
-                // the live edge, the LazyColumn's measure passes absorb
-                // content-chain changes under a still viewport — streaming
-                // growth, the thinking→text handoff collapse, live-edge
-                // insertions — by scrolling exactly the measured top-edge
-                // rise INSIDE the measure frame, the only zero-lag
-                // compensation point (the measured 12:51 sawtooth showed
-                // collector-issued corrections, dispatchRawDelta and
-                // requestScrollToItem alike, always landing one frame late).
-                // Supersedes the height-freeze scheme, whose frozen row
-                // height went stale across the handoff, collapsed the row on
-                // zero-height recycle measures, and needed a raw-delta flush
-                // plus frozenOff/thawOff hysteresis on release. Compaction is
-                // deliberately out of scope: it removes rows under the
-                // reader, which must re-anchor, not hold. See ReadingAnchor.kt.
+                // the live edge, live rows report min(real, frozen) from their
+                // measure pass. Streaming growth is therefore withheld in the
+                // same frame rather than shown and corrected a frame later.
+                // Both gesture directions retain the freeze; only settling at
+                // the live edge reveals the tail. Real shrinkage still lowers
+                // the frozen level for thinking→text handoff. Compaction is
+                // deliberately out of scope: it removes rows under the reader,
+                // which must re-anchor, not hold. See ReadingAnchor.kt.
                 val readingAnchorActive: () -> Boolean = {
                     ScrollDebugFlags.readingAnchorEnabled &&
                         userScrolledAway && pendingSearchMessageId == null &&
@@ -4121,7 +4115,6 @@ fun ChatScreen(
                         // measure. See ReadingAnchor.kt.
                         .readingFreezeHost(
                             readingAnchor,
-                            listState,
                             active = readingAnchorActive,
                             gestureActive = {
                                 isUserDragging || userDragAwaitingSettle || listState.isScrollInProgress

@@ -1,13 +1,11 @@
 package com.openminis.app.ui.chat
 
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.layout
-import com.openminis.app.logging.AppLogger
 
 /**
  * The detached-reading freeze, rebuilt after the height-freeze scheme
@@ -42,14 +40,15 @@ import com.openminis.app.logging.AppLogger
  *     live edge itself no compensation runs — the reveal is the stream the
  *     reader asked for.
  *
- * Motion handling, also measured on device: scrolling DOWN toward the live
- * edge thaws (the levels clear, the tail reveals, the down-scroll absorbs
- * the expansion — the old scheme's thaw rule); scrolling UP or holding keeps
- * the freeze, so travel runs over a static transcript at true 1:1. Gesture
- * frames defer shrink-following (the async markdown renderer's own
- * per-remeasure height jitter, +/-10-60px on a row whose laid-out size steps
- * monotonically, is filtered by the collapse threshold); still frames follow
- * every shrink, where the measurements are clean.
+ * Motion handling, also measured on device: both scroll directions keep the
+ * freeze, so travel runs over a static transcript at true 1:1. Releasing the
+ * levels on every downward frame exposed each concurrent 71-168px streaming
+ * growth step and moved the reading point by exactly that amount. The tail now
+ * reveals only after the reader settles at the live edge. Gesture frames defer
+ * shrink-following (the async markdown renderer's own per-remeasure height
+ * jitter, +/-10-60px on a row whose laid-out size steps monotonically, is
+ * filtered by the collapse threshold); still frames follow every shrink,
+ * where the measurements are clean.
  */
 internal class ReadingAnchorState {
     /** Frozen reported height per row key (the freeze level). */
@@ -67,20 +66,13 @@ internal class ReadingAnchorState {
     /** Whether the latest frame was a gesture frame. */
     internal var gestureFrames: Boolean = false
 
-    /** Whether the previous pass scrolled toward the live edge (thaw). */
-    internal var thawing: Boolean = false
-
     /** One-shot viewport compensation for the tail when the freeze lifts. */
     internal var releaseCompensation by mutableStateOf(0)
-
-    internal var lastOff: Int = -1
 
     fun reset() {
         frozenHeights.clear()
         hiddenPx.clear()
         hiddenTotal = 0
-        thawing = false
-        lastOff = -1
     }
 }
 
@@ -100,7 +92,6 @@ internal fun Modifier.liveRowFreeze(state: ReadingAnchorState, key: Any): Modifi
             val level = state.frozenHeights[key]
             when {
                 level == null -> state.frozenHeights[key] = real
-                state.thawing -> state.frozenHeights.remove(key)
                 state.gestureFrames && real < level - GESTURE_COLLAPSE_FOLLOW_PX ->
                     state.frozenHeights[key] = real
                 !state.gestureFrames && real < level -> state.frozenHeights[key] = real
@@ -115,14 +106,13 @@ internal fun Modifier.liveRowFreeze(state: ReadingAnchorState, key: Any): Modifi
 
 /**
  * Attach to the chat LazyColumn, above the rows. Drives the freeze lifecycle:
- * engages while [active] (reader detached, turn live, adb opt-in), thaws on
- * downward travel, releases at the live edge, and queues the withheld tail
- * as [ReadingAnchorState.releaseCompensation] when the freeze lifts away
- * from the edge.
+ * engages while [active] (reader detached, turn live, adb opt-in), releases
+ * at the live edge, and queues the withheld tail as
+ * [ReadingAnchorState.releaseCompensation] when the freeze lifts away from
+ * the edge.
  */
 internal fun Modifier.readingFreezeHost(
     state: ReadingAnchorState,
-    listState: LazyListState,
     active: () -> Boolean,
     gestureActive: () -> Boolean,
     atLiveEdge: () -> Boolean,
@@ -143,33 +133,14 @@ internal fun Modifier.readingFreezeHost(
     var hidden = 0
     for (value in state.hiddenPx.values) hidden += value
     state.hiddenTotal = hidden
-    if (nowActive) {
-        val off = listState.firstVisibleItemScrollOffset
-        when {
-            off < state.lastOff -> {
-                // Downward travel: thaw — the tail reveals and the
-                // down-scroll absorbs the expansion.
-                state.frozenHeights.clear()
-                state.hiddenPx.clear()
-                state.hiddenTotal = 0
-                state.thawing = true
-            }
-            atLiveEdge() && !gestureActive() -> {
-                // Settled at the live edge: release. Mid-gesture the arm
-                // logic owns the intent — releasing per-frame would fight
-                // the drag that just armed it.
-                onLiveEdgeSettle()
-                state.frozenHeights.clear()
-                state.hiddenPx.clear()
-                state.hiddenTotal = 0
-                state.thawing = false
-            }
-            else -> state.thawing = false
-        }
-        state.lastOff = off
-    } else {
-        state.thawing = false
-        state.lastOff = -1
+    if (nowActive && atLiveEdge() && !gestureActive()) {
+        // Settled at the live edge: release. Mid-gesture the arm logic owns
+        // the intent — releasing per-frame would fight the drag that just
+        // armed it.
+        onLiveEdgeSettle()
+        state.frozenHeights.clear()
+        state.hiddenPx.clear()
+        state.hiddenTotal = 0
     }
     layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
 }
