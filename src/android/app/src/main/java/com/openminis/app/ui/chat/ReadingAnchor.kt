@@ -292,8 +292,13 @@ internal class ReadingAnchorConnection(
         }
         val growth = state.lastTopPx - state.glueTopPx
         if (growth != 0) {
+            // glueTopPx is the HELD target, never the last published
+            // geometry: the absorption moves the measured top back onto it
+            // (content rose G, viewport moved G toward older — net zero),
+            // and updating it here would make the next event read its own
+            // absorption as negative growth — the measured ±22px/8ms
+            // flicker. The target only moves at re-anchors and re-baselines.
             listState.dispatchRawDelta(growth.toFloat())
-            state.glueTopPx = state.lastTopPx
             if (ScrollDebugFlags.traceMoves) {
                 AppLogger.debug(
                     "ScrollReadingAnchor",
