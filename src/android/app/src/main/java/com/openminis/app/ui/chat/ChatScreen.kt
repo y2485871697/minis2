@@ -3687,6 +3687,7 @@ fun ChatScreen(
                     var anchorKey: Any? = null
                     var anchorOffset = 0
                     var wasPaused = false
+                    var correctionPending = false
 
                     snapshotFlow {
                         val info = listState.layoutInfo
@@ -3738,12 +3739,29 @@ fun ChatScreen(
                         }
 
                         val drift = anchor.third - anchorOffset
-                        if (kotlin.math.abs(drift) > 1) {
-                            // Positive drift means the content was pushed down;
-                            // the same positive raw delta moves it back up.
-                            // Keep the original anchorOffset so the next layout
-                            // pass verifies that the correction actually landed.
-                            listState.dispatchRawDelta(drift.toFloat())
+                        if (kotlin.math.abs(drift) > 1 && !correctionPending) {
+                            // Coalesce all size changes committed before the
+                            // next frame. Calling dispatchRawDelta here made
+                            // every measurement trigger another measurement,
+                            // which was visible as a flash on some devices.
+                            correctionPending = true
+                            withFrameNanos { }
+                            if (viewModel.isStreaming.value &&
+                                userScrolledAway && !isUserDragging &&
+                                !userDragAwaitingSettle && !listState.isScrollInProgress
+                            ) {
+                                val current = listState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { it.key == anchorKey }
+                                if (current != null &&
+                                    kotlin.math.abs(current.offset - anchorOffset) > 1
+                                ) {
+                                    // One non-animated anchor request per
+                                    // frame; this does not create a scroll
+                                    // animation or a raw-delta feedback loop.
+                                    listState.requestScrollToItem(current.index, anchorOffset)
+                                }
+                            }
+                            correctionPending = false
                         }
                     }
                 }
