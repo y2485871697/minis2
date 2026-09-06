@@ -705,6 +705,7 @@ fun ChatScreen(
     onModelGroupsClick: () -> Unit = {},
 ) {
     val context = LocalContext.current
+    remember { ScrollDebugFlags.bind(context) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     // Scoped to a process-level per-session ViewModelStore (ChatViewModelStore)
@@ -1456,6 +1457,22 @@ fun ChatScreen(
         }
         Unit
     }
+    // [T-android-scroll-diagnosis] Non-suspending counterpart for the two
+    // writers that deliberately use requestScrollToItem (the bottom pin and
+    // the reading-anchor compensation): it must not enter the scroll mutator
+    // mutex or set isScrollInProgress, so the traced suspend helpers cannot
+    // wrap it. Logging is gated behind the adb switch because the pin fires
+    // on every streaming row advance.
+    val tracedRequestScrollToItem: (source: String, idx: Int, off: Int) -> Unit = { source, idx, off ->
+        if (ScrollDebugFlags.traceMoves) {
+            AppLogger.debug(
+                "ScrollSrc",
+                "requestScrollToItem src=$source idx=$idx off=$off canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset} inProgress=${listState.isScrollInProgress}",
+            )
+        }
+        runCatching { listState.requestScrollToItem(idx, off) }
+        Unit
+    }
     // T-android-jank-profile: gate verbose scroll telemetry behind a constant
     // so every snapshotFlow / derivedStateOf body in this file can cheaply
     // skip the AppLogger.debug call (which builds a long format string and
@@ -2159,9 +2176,58 @@ fun ChatScreen(
                 visibleItems = info.visibleItemsInfo.map { Triple(it.index, it.offset, it.size) },
             )
         }.distinctUntilChanged().collect { layout ->
-            if (layout.shouldPin(following, userScrolledAway, compacting = compactProgress != null)) {
-                listState.requestScrollToItem(0, 0)
+            if (layout.shouldPin(following, userScrolledAway, compacting = compactProgress != null) &&
+                ScrollDebugFlags.pinFollowEnabled
+            ) {
+                tracedRequestScrollToItem("PIN-FOLLOW", 0, 0)
             }
+        }
+    }
+
+    // [T-android-scroll-diagnosis] One snapshot per layout change while the
+    // adb switch is on. `firstOff` (firstVisibleItemScrollOffset) and the
+    // first item's raw `offset` are printed side by side: their relationship
+    // is the coordinate convention every correction depends on, and it is
+    // exactly what was assumed rather than measured in the slide/flicker fix
+    // loop. Also exposes beforeContentPadding so a padding-driven drift
+    // (IME / bottomReserve) is recognizable as an equal-and-opposite offset
+    // shift with no scroll call anywhere.
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            val info = listState.layoutInfo
+            if (!ScrollDebugFlags.frameSnapshots) return@snapshotFlow null
+            val first = info.visibleItemsInfo.firstOrNull()
+            ScrollFrameSnapshot(
+                firstIdx = listState.firstVisibleItemIndex,
+                firstOff = listState.firstVisibleItemScrollOffset,
+                firstKey = first?.key?.toString() ?: "-",
+                firstItemOffset = first?.offset ?: Int.MIN_VALUE,
+                firstItemSize = first?.size ?: 0,
+                viewportStart = info.viewportStartOffset,
+                viewportEnd = info.viewportEndOffset,
+                beforePadding = info.beforeContentPadding,
+                afterPadding = info.afterContentPadding,
+                totalItems = info.totalItemsCount,
+                inProgress = listState.isScrollInProgress,
+                streaming = viewModel.isStreaming.value,
+                detached = userScrolledAway,
+            )
+        }.distinctUntilChanged().collect { snapshot ->
+            if (snapshot != null) AppLogger.debug("ScrollFrame", "$snapshot")
+        }
+    }
+    // [T-android-scroll-diagnosis] The intent flag has ~12 writers; the ARM
+    // net logs only its own arming. This watcher records EVERY flip with the
+    // streaming context, so a fight between the pin and the reading anchor
+    // (both keyed on this flag) shows up as a flip-flop burst instead of
+    // being visible only as a viewport fight.
+    LaunchedEffect(viewModel) {
+        snapshotFlow { userScrolledAway }.distinctUntilChanged().collect { away ->
+            AppLogger.debug(
+                "ScrollFollow",
+                "userScrolledAway=$away streaming=${viewModel.isStreaming.value} " +
+                    "firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+            )
         }
     }
 
@@ -3418,7 +3484,9 @@ fun ChatScreen(
                     // within 2s of the user's send).
                     val sinceSendMs = System.currentTimeMillis() - lastUserAppendMs
                     val sendGrace = lastUserAppendMs > 0L && sinceSendMs in 0..SEND_FOLLOW_GRACE_MS
-                    if (!userScrolledAway && (isNearBottom.value || sendGrace)) {
+                    if (!userScrolledAway && (isNearBottom.value || sendGrace) &&
+                        ScrollDebugFlags.reserveChangeEnabled
+                    ) {
                         val reason = if (!isNearBottom.value) "send-grace" else "near-bottom"
                         tracedScrollToItem("reserve-change/$reason", 0, 0)
                     }
@@ -3746,7 +3814,8 @@ fun ChatScreen(
                             // which was visible as a flash on some devices.
                             correctionPending = true
                             withFrameNanos { }
-                            if (viewModel.isStreaming.value &&
+                            if (ScrollDebugFlags.readingAnchorEnabled &&
+                                viewModel.isStreaming.value &&
                                 userScrolledAway && !isUserDragging &&
                                 !userDragAwaitingSettle && !listState.isScrollInProgress
                             ) {
@@ -3758,7 +3827,11 @@ fun ChatScreen(
                                     // One non-animated anchor request per
                                     // frame; this does not create a scroll
                                     // animation or a raw-delta feedback loop.
-                                    listState.requestScrollToItem(current.index, anchorOffset)
+                                    tracedRequestScrollToItem(
+                                        "READING-ANCHOR drift=$drift",
+                                        current.index,
+                                        anchorOffset,
+                                    )
                                 }
                             }
                             correctionPending = false
@@ -3894,6 +3967,7 @@ fun ChatScreen(
                     val sendGrace = lastUserAppendMs > 0L && sinceSendForPin <= SEND_FOLLOW_GRACE_MS
                     val streamingActive = viewModel.isStreaming.value && !userScrolledAway
                     if (!sendGrace && !streamingActive) return@LaunchedEffect
+                    if (!ScrollDebugFlags.trailingRowEnabled) return@LaunchedEffect
                     lastTrailingPinKey = newest.key
                     tracedScrollToItem("trailing-row/${newest.contentType}", 0, 0)
                 }
@@ -4054,6 +4128,12 @@ fun ChatScreen(
                                 userScrolledAway = true
                                 followCompletedStream = false
                                 lastInterruptMs = System.currentTimeMillis()
+                                if (ScrollDebugFlags.traceMoves) {
+                                    AppLogger.debug(
+                                        "ScrollSrc",
+                                        "nested-pause arm y=${available.y} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+                                    )
+                                }
                             }
                             return androidx.compose.ui.geometry.Offset.Zero
                         }
