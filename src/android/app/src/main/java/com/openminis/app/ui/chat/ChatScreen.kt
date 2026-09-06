@@ -3768,13 +3768,22 @@ fun ChatScreen(
                 // is handed to the viewport as one raw delta so the reading
                 // point does not jump.
                 LaunchedEffect(listState, sessionId) {
+                    // EVERY engage/release input is read inside the snapshot:
+                    // the 14:22 regression read the gesture flags only in
+                    // collect, so nothing re-emitted when a drag ended and the
+                    // freeze never engaged at all (the live row kept sliding).
                     snapshotFlow {
-                        Triple(
-                            viewModel.isStreaming.value,
-                            isNearBottom.value,
-                            pendingSearchMessageId == null,
-                        )
-                    }.collect { (streaming, nearBottom, noSearch) ->
+                        val streaming = viewModel.isStreaming.value
+                        val nearBottom = isNearBottom.value
+                        val noSearch = pendingSearchMessageId == null
+                        val gestureIdle = !isUserDragging && !userDragAwaitingSettle &&
+                            !listState.isScrollInProgress
+                        // Not parked exactly on the live edge (there the
+                        // native reverse-layout follow owns the viewport).
+                        val offLiveEdge = !(listState.firstVisibleItemIndex == 0 &&
+                            listState.firstVisibleItemScrollOffset == 0)
+                        Triple(streaming, nearBottom, noSearch && gestureIdle && offLiveEdge)
+                    }.collect { (streaming, nearBottom, freeable) ->
                         // Hysteresis on purpose: NEAR-BOTTOM ALONE MUST NOT
                         // RELEASE. It flips true while the user is still
                         // dragging toward the live edge, and releasing then
@@ -3782,12 +3791,9 @@ fun ChatScreen(
                         // 14:03 loop yanked the reader back to the frozen
                         // position on every drag ("pinned in place"). Release
                         // only when the gesture has fully settled at the edge,
-                        // or the turn/search ended; engage only on a settled
-                        // gesture too, so the anchor captures a rest position.
-                        val gestureIdle = !isUserDragging && !userDragAwaitingSettle &&
-                            !listState.isScrollInProgress
+                        // or the turn/search ended.
                         if (readingFreeze.frozen) {
-                            val release = !streaming || !noSearch || (nearBottom && gestureIdle)
+                            val release = !streaming || !freeable || (nearBottom && freeable)
                             if (!release) return@collect
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
@@ -3801,9 +3807,14 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            if (streaming && !nearBottom && noSearch && gestureIdle) {
+                            if (streaming && freeable) {
                                 readingFreeze.frozen = true
                                 readingFreeze.freezeEpoch++
+                                AppLogger.debug(
+                                    "ScrollReadingAnchor",
+                                    "engage epoch=${readingFreeze.freezeEpoch} " +
+                                        "firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+                                )
                             }
                         }
                     }
