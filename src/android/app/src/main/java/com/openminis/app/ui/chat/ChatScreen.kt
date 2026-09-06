@@ -3775,6 +3775,23 @@ fun ChatScreen(
                         (viewModel.isStreaming.value ||
                             (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
                 }
+                // [T-android-reading-anchor] The freeze lifts away from the
+                // live edge with the tail withheld: hand it to the viewport
+                // as one raw delta so the reading point does not jump (the
+                // old scheme's release rule). One frame late by dispatch
+                // timing — the shipped release behavior.
+                LaunchedEffect(readingAnchor, listState) {
+                    snapshotFlow { readingAnchor.releaseCompensation }.collect { compensation ->
+                        if (compensation != 0) {
+                            readingAnchor.releaseCompensation = 0
+                            listState.dispatchRawDelta(compensation.toFloat())
+                            AppLogger.debug(
+                                "ScrollReadingAnchor",
+                                "release compensate $compensation",
+                            )
+                        }
+                    }
+                }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
                     val originalIndex = flatItems.indexOfFirst { item ->
@@ -4099,10 +4116,10 @@ fun ChatScreen(
                         bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
                     ),
                     modifier = Modifier
-                        // [T-android-reading-anchor] Measure-frame detached-
-                        // reading compensation; outermost so it wraps the
-                        // list's own measure. See ReadingAnchor.kt.
-                        .liveReadingAnchor(
+                        // [T-android-reading-anchor] The detached-reading
+                        // freeze host; outermost so it wraps the list's own
+                        // measure. See ReadingAnchor.kt.
+                        .readingFreezeHost(
                             readingAnchor,
                             listState,
                             active = readingAnchorActive,
@@ -4307,8 +4324,28 @@ fun ChatScreen(
                             }
                         }
                         val isNewestItem = item == flatItems.lastOrNull()
+                        val isLiveStreamingRow = when (item) {
+                            is FlatChatItem.AssistantText -> item.isStreaming
+                            is FlatChatItem.AssistantMarkdownBlock -> item.messageIsStreaming
+                            is FlatChatItem.AssistantThinking -> item.messageIsStreaming && item.isLastBlockOverall
+                            is FlatChatItem.AssistantLegacyContent -> item.isStreaming
+                            else -> false
+                        }
                         Box(
                             modifier = Modifier
+                                .then(
+                                    // [T-android-reading-anchor] The per-row
+                                    // freeze: while the reader is detached the
+                                    // live row reports its settled height and
+                                    // growth hides in the clipped overflow
+                                    // below the fold; shrinks (the thinking→
+                                    // text collapse) show instantly.
+                                    if (isLiveStreamingRow) {
+                                        Modifier.liveRowFreeze(readingAnchor, item.key)
+                                    } else {
+                                        Modifier
+                                    }
+                                )
                                 .alpha(rowAlpha)
                                 .then(
                                     if (isNewestItem) {

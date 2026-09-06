@@ -1,100 +1,126 @@
 package com.openminis.app.ui.chat
 
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.layout
 import com.openminis.app.logging.AppLogger
 
 /**
- * Measure-frame reading anchor for detached reading during a live turn.
+ * The detached-reading freeze, rebuilt after the height-freeze scheme
+ * (ReadingFreeze.kt, deleted) with its three measured failure modes
+ * structurally eliminated. The freeze keeps the transcript pixel-stable
+ * while the reader is away from the live edge: rows report the height they
+ * had when the reader last settled, streaming growth accumulates in the
+ * row's clipped overflow below the fold, and the tail reveals when the
+ * reader scrolls back down. The measurement frame is the only zero-latency
+ * compensation point — here the "compensation" is the height report itself,
+ * written in-measure, so no scroll command runs while detached (the measured
+ * 12:51 sawtooth: scroll corrections issued outside the measure frame always
+ * presented the grown frame first and corrected one frame later).
  *
- * Supersedes the height-freeze scheme (ReadingFreeze.kt, deleted). The freeze
- * held every live row's reported height at the freeze point and clipped the
- * appended tail, which kept the transcript pixel-stable but carried three
- * measured failure modes, all rooted in lying about the row height instead of
- * moving the viewport:
+ * The rebuild, lesson by lesson:
  *
- *  1. The frozen anchor went stale across the thinking→text row handoff — the
- *     row's content shape changes (reasoning body collapses into a header, a
- *     text row appears below it), so the captured height stopped describing
- *     the row and the engage/epoch/thaw bookkeeping fought the swap.
- *  2. A zero-height measure — the recycled/prefetched item re-entering the
- *     viewport measured empty — captured as the anchor collapsed the whole
- *     streaming row to nothing (the vanished-message repro).
- *  3. The withheld tail had to be handed to the viewport as one raw delta on
- *     release, an unavoidable jump, with hysteresis (frozenOff/thawOff)
- *     wrapped around it.
+ *  1. Handoff staleness. The old freeze captured one anchor height per row
+ *     at engage and reported it unconditionally, so the thinking→text
+ *     handoff (a row collapsing from its reasoning body to a header while a
+ *     text row appears below) left stale height and stale content glued
+ *     together. Now each row reports min(real, level): a shrink shows
+ *     instantly, only growth is hidden, and the level follows the shrink —
+ *     there is no stale state to go stale.
+ *  2. Zero-height recycle collapse. A zero-height measure (the recycled
+ *     item re-entering the viewport) updates nothing: the level persists,
+ *     the row re-measures at its real height, and the delta vs the level is
+ *     treated as growth (hidden) instead of collapsing the row.
+ *  3. The release jump. The withheld tail is accounted continuously
+ *     ([hiddenPx]); when the freeze lifts away from the live edge the whole
+ *     tail is handed to the viewport as one raw delta so the reading point
+ *     does not jump (the old scheme's release rule, kept verbatim). At the
+ *     live edge itself no compensation runs — the reveal is the stream the
+ *     reader asked for.
  *
- * The rikkahub ChatList.kt model this replaces it with: never hide growth,
- * never fight the finger. At the live edge, reverseLayout's native bottom
- * anchor plus the BottomFollowLayout pin already hold the newest row. When
- * the reader is DETACHED, the growing tail sits below the reading position
- * under reverseLayout, and this anchor absorbs its growth with zero visual
- * lag — the measure frame is the only zero-latency compensation point (the
- * measured 12:51 sawtooth: corrections issued from a snapshotFlow collector,
- * via dispatchRawDelta or requestScrollToItem alike, presented the grown
- * frame first and corrected one frame later; a synchronous dispatchRawDelta
- * from the collector re-entered measure visibly instead).
- *
- * The correction is requestScrollToItem — never dispatchRawDelta, whose
- * inline remeasure trips "performMeasureAndLayout called during measure
- * layout" from inside the list's own measure (the 19:13 crash) and reenters
- * measurement from a collector (the d746a60 flash). Because it cancels any
- * in-progress scroll, the pass is skipped while the gesture flags are set:
- * drags and flings own the viewport. (A gesture-time absorption channel was
- * attempted three ways — top-edge shift minus the consumed finger delta, and
- * finger-immune row-height probes — and abandoned: the async markdown
- * renderer's own per-remeasure height jitter feeds both signals during
- * scrolling, and absorbing it produced on-device flicker. Motion frames stay
- * native; the anchor engages the moment the reader settles.)
- *
- * The position STATE also leads the measured GEOMETRY by a pass (the
- * on-device 19:46 trace: trusting the state re-requested against stale
- * geometry and ping-ponged ±71px), so an in-flight request is judged only by
- * the glue row's measured offset.
- *
- * At the live edge the anchor stands down entirely and releases the hard
- * pause: the reader who scrolled back to the bottom wants the stream, and
- * reverseLayout's native anchor plus the BottomFollowLayout pin take over
- * (the freeze's release-at-live-edge rule).
+ * Motion handling, also measured on device: scrolling DOWN toward the live
+ * edge thaws (the levels clear, the tail reveals, the down-scroll absorbs
+ * the expansion — the old scheme's thaw rule); scrolling UP or holding keeps
+ * the freeze, so travel runs over a static transcript at true 1:1. Gesture
+ * frames defer shrink-following (the async markdown renderer's own
+ * per-remeasure height jitter, +/-10-60px on a row whose laid-out size steps
+ * monotonically, is filtered by the collapse threshold); still frames follow
+ * every shrink, where the measurements are clean.
  */
 internal class ReadingAnchorState {
-    /** Key of the row the reading position glues to. */
-    internal var glueKey: Any? = null
+    /** Frozen reported height per row key (the freeze level). */
+    internal val frozenHeights = HashMap<Any, Int>()
 
-    /** Glue row's top-edge height above the viewport bottom, in px. */
-    internal var glueTopPx: Int = 0
+    /** Per-row hidden growth (real - reported), refreshed every pass. */
+    internal val hiddenPx = HashMap<Any, Int>()
 
-    internal var lastIdx: Int = -1
+    /** Sum of [hiddenPx] after the latest pass — the withheld tail. */
+    internal var hiddenTotal: Int = 0
+
+    /** Whether the freeze currently applies (detached + turn live). */
+    internal var freezeActive: Boolean = false
+
+    /** Whether the latest frame was a gesture frame. */
+    internal var gestureFrames: Boolean = false
+
+    /** Whether the previous pass scrolled toward the live edge (thaw). */
+    internal var thawing: Boolean = false
+
+    /** One-shot viewport compensation for the tail when the freeze lifts. */
+    internal var releaseCompensation by mutableStateOf(0)
+
     internal var lastOff: Int = -1
 
-    /** Delta requested in a previous pass and not yet seen in the geometry. */
-    internal var pendingDelta: Int = 0
-
-    /** The glue top edge the pending request was computed from. */
-    internal var pendingTopPx: Int = 0
-
-    internal var primed: Boolean = false
-
     fun reset() {
-        glueKey = null
-        glueTopPx = 0
-        lastIdx = -1
+        frozenHeights.clear()
+        hiddenPx.clear()
+        hiddenTotal = 0
+        thawing = false
         lastOff = -1
-        pendingDelta = 0
-        pendingTopPx = 0
-        primed = false
     }
 }
 
 /**
- * Attach to the chat LazyColumn. While [active] holds (reader detached, turn
- * live, adb opt-in), content-chain changes under a still viewport are
- * absorbed so the reading position never visibly moves. See
- * [ReadingAnchorState] for the design and its measured history.
+ * Per-row freeze. Attach to EVERY chat row: while the freeze applies, the
+ * row reports the height it had when its level was set (growth hidden in the
+ * clipped overflow below the fold), follows real shrinks instantly (still
+ * frames) or after a collapse-sized drop (gesture frames, filtering the
+ * renderer's measurement jitter), and reports its real height otherwise.
  */
-internal fun Modifier.liveReadingAnchor(
+internal fun Modifier.liveRowFreeze(state: ReadingAnchorState, key: Any): Modifier =
+    clipToBounds().layout { measurable, constraints ->
+        val placeable = measurable.measure(constraints)
+        val real = placeable.height
+        var reported = real
+        if (state.freezeActive && real > 0) {
+            val level = state.frozenHeights[key]
+            when {
+                level == null -> state.frozenHeights[key] = real
+                state.thawing -> state.frozenHeights.remove(key)
+                state.gestureFrames && real < level - GESTURE_COLLAPSE_FOLLOW_PX ->
+                    state.frozenHeights[key] = real
+                !state.gestureFrames && real < level -> state.frozenHeights[key] = real
+            }
+            reported = state.frozenHeights[key] ?: real
+            state.hiddenPx[key] = real - reported
+        } else {
+            state.hiddenPx.remove(key)
+        }
+        layout(placeable.width, reported) { placeable.placeRelative(0, 0) }
+    }
+
+/**
+ * Attach to the chat LazyColumn, above the rows. Drives the freeze lifecycle:
+ * engages while [active] (reader detached, turn live, adb opt-in), thaws on
+ * downward travel, releases at the live edge, and queues the withheld tail
+ * as [ReadingAnchorState.releaseCompensation] when the freeze lifts away
+ * from the edge.
+ */
+internal fun Modifier.readingFreezeHost(
     state: ReadingAnchorState,
     listState: LazyListState,
     active: () -> Boolean,
@@ -102,121 +128,51 @@ internal fun Modifier.liveReadingAnchor(
     atLiveEdge: () -> Boolean,
     onLiveEdgeSettle: () -> Unit,
 ): Modifier = layout { measurable, constraints ->
+    val nowActive = active()
+    val wasActive = state.freezeActive
+    state.freezeActive = nowActive
+    state.gestureFrames = gestureActive()
+    if (wasActive && !nowActive && state.hiddenTotal > 0 && !atLiveEdge()) {
+        // The freeze lifts away from the live edge (the turn ended, the
+        // reader re-followed): hand the withheld tail to the viewport as one
+        // raw delta so the reading point does not jump when the rows report
+        // their real heights.
+        state.releaseCompensation = state.hiddenTotal
+    }
     val placeable = measurable.measure(constraints)
-    if (active()) {
-        val idx = listState.firstVisibleItemIndex
+    var hidden = 0
+    for (value in state.hiddenPx.values) hidden += value
+    state.hiddenTotal = hidden
+    if (nowActive) {
         val off = listState.firstVisibleItemScrollOffset
-        if (atLiveEdge()) {
-            // The reader is back at the live edge: release the hard pause and
-            // hand the viewport to the follow machinery. Nothing is held
-            // here — compensating would pin the newest text below the fold.
-            onLiveEdgeSettle()
-            state.reset()
-        } else if (!gestureActive()) {
-            // Read the layout info written by the measure above UNOBSERVED:
-            // an observed layoutInfo read inside a measure lambda
-            // re-invalidates on the list's every-measure layoutInfo write and
-            // ping-pongs passes.
-            val info = Snapshot.withoutReadObservation { listState.layoutInfo }
-            val visible = info.visibleItemsInfo
-            // visibleItemsInfo can transiently be empty mid-measure
-            // (T-android-scroll-isnearbottom-bug); keep the baseline, act
-            // next pass.
-            if (visible.isNotEmpty()) {
-                // Last in layout order = topmost visible row = the oldest
-                // content on screen; everything below it down to the live
-                // edge glues to its top edge.
-                val glue = visible.last()
-                val top = glue.offset + glue.size
-                if (glue.size <= 0) {
-                    // Recycle/prefetch artifact: a zero-height measure of a
-                    // re-entering item must never become the reference (this
-                    // is what collapsed rows to nothing under the freeze).
-                } else if (!state.primed || glue.key != state.glueKey) {
-                    state.glueKey = glue.key
-                    state.glueTopPx = top
-                    state.lastIdx = idx
-                    state.lastOff = off
-                    state.pendingDelta = 0
-                    state.primed = true
-                } else if (state.pendingDelta != 0) {
-                    // A request is in flight. The position STATE leads the
-                    // measured GEOMETRY by a pass — judge only by the glue
-                    // row's offset.
-                    val expectedOffset = -(state.lastOff + state.pendingDelta)
-                    if (glue.offset == expectedOffset) {
-                        // Applied. Judge the residual against the target held
-                        // across the apply; growth composed into the same
-                        // frame is absorbed instead of re-baselined.
-                        state.lastOff = off
-                        val rise = top - state.glueTopPx
-                        state.pendingDelta = 0
-                        if (rise != 0) {
-                            requestRise(state, listState, rise, glue.key, idx, off, top)
-                        }
-                    } else if (top != state.pendingTopPx || idx != state.lastIdx) {
-                        // The geometry moved while the request was in flight
-                        // (further growth, an external mover): the request is
-                        // stale — adopt the current geometry.
-                        state.pendingDelta = 0
-                        state.glueTopPx = top
-                        state.lastIdx = idx
-                        state.lastOff = off
-                    }
-                    // else: still in flight — wait. A second request against
-                    // the lagging geometry is exactly what oscillated on
-                    // device.
-                } else {
-                    val positionMoved = idx != state.lastIdx || off != state.lastOff
-                    state.lastIdx = idx
-                    state.lastOff = off
-                    if (positionMoved) {
-                        // A drag, fling or programmatic jump owns the
-                        // viewport — follow it; never fight it.
-                        state.glueTopPx = top
-                    } else {
-                        val rise = top - state.glueTopPx
-                        if (rise != 0) {
-                            requestRise(state, listState, rise, glue.key, idx, off, top)
-                        }
-                    }
-                }
+        when {
+            off < state.lastOff -> {
+                // Downward travel: thaw — the tail reveals and the
+                // down-scroll absorbs the expansion.
+                state.frozenHeights.clear()
+                state.hiddenPx.clear()
+                state.hiddenTotal = 0
+                state.thawing = true
             }
+            atLiveEdge() && !gestureActive() -> {
+                // Settled at the live edge: release. Mid-gesture the arm
+                // logic owns the intent — releasing per-frame would fight
+                // the drag that just armed it.
+                onLiveEdgeSettle()
+                state.frozenHeights.clear()
+                state.hiddenPx.clear()
+                state.hiddenTotal = 0
+                state.thawing = false
+            }
+            else -> state.thawing = false
         }
+        state.lastOff = off
     } else {
-        state.reset()
+        state.thawing = false
+        state.lastOff = -1
     }
     layout(placeable.width, placeable.height) { placeable.placeRelative(0, 0) }
 }
 
-private fun requestRise(
-    state: ReadingAnchorState,
-    listState: LazyListState,
-    rise: Int,
-    glueKey: Any?,
-    idx: Int,
-    off: Int,
-    top: Int,
-) {
-    if (listState.isScrollInProgress) {
-        // requestScrollToItem cancels any scroll in progress — a drag or
-        // fling owns the viewport. Adopt the moved geometry instead of
-        // fighting it; the anchor re-baselines through the follow-up passes.
-        state.pendingDelta = 0
-        state.glueTopPx += rise
-        return
-    }
-    // Zero-lag write: the position lands at a follow-up measure pass of
-    // THIS frame. A boundary clamp (rise larger than the remaining scroll
-    // range — e.g. a collapse that lands the reader at the live edge) shows
-    // up as a geometry mismatch against pendingTopPx and re-baselines there.
-    listState.requestScrollToItem(idx, off + rise)
-    state.pendingDelta = rise
-    state.pendingTopPx = top
-    if (ScrollDebugFlags.traceMoves) {
-        AppLogger.debug(
-            "ScrollReadingAnchor",
-            "rise=$rise requested idx=$idx off=${off + rise} key=$glueKey",
-        )
-    }
-}
+/** A shrink smaller than this during a gesture frame is renderer jitter. */
+private const val GESTURE_COLLAPSE_FOLLOW_PX = 96
