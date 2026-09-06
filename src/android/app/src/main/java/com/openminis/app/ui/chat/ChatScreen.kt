@@ -3779,7 +3779,7 @@ fun ChatScreen(
                         Triple(
                             viewModel.isStreaming.value && pendingSearchMessageId == null,
                             isNearBottom.value,
-                            Triple(
+                            Pair(
                                 userScrolledAway,
                                 !isUserDragging && !userDragAwaitingSettle &&
                                     !listState.isScrollInProgress,
