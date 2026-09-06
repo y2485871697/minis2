@@ -879,7 +879,7 @@ fun ChatScreen(
     // across forward navigation (file preview, env vars, etc.); see
     // ChatViewModel.listState for the why.
     val listState = viewModel.listState
-    val readingFreeze = remember { ReadingFreezeState() }
+    val readingAnchor = remember { ReadingAnchorState() }
     // T325: draft persists on the VM so navigation (e.g. push EnvVars and
     // pop back) doesn't wipe what the user has typed. Mirrors iOS
     // `AIChatView` which binds the composer against `vm.inputText`.
@@ -3753,108 +3753,27 @@ fun ChatScreen(
                     (if (canResume && !isStreaming && error == null &&
                         messages.lastOrNull { it.role == "assistant" }?.error?.isNotBlank() != true
                     ) 1 else 0)
-                // [T-android-reading-anchor] While the reader is detached
-                // from the live edge, freeze the growing streaming row AT
-                // MEASURE TIME (liveRowReadingFreeze reports the height
-                // captured at the freeze point and clips the tail). A
-                // scroll-based correction can only react one frame after the
-                // growth was measured and presented — the measured 12:51
-                // sawtooth (up ~71px, snap back, once per chunk) — so the
-                // viewport must never fight the growth in the first place.
-                // Frozen rows keep the whole transcript pixel-stable with
-                // zero scroll commands while new text accumulates below the
-                // fold. On release (back near the live edge, or the turn
-                // ending) the row expands; away from the edge that expansion
-                // is handed to the viewport as one raw delta so the reading
-                // point does not jump.
-                LaunchedEffect(listState, sessionId) {
-                    var frozenOff = 0
-                    var thawOff = -1
-                    // EVERY engage/release input is read inside the snapshot:
-                    // the 14:22 regression read the gesture flags only in
-                    // collect, so nothing re-emitted when a drag ended and the
-                    // freeze never engaged at all (the live row kept sliding).
-                    snapshotFlow {
-                        // Every input read INSIDE the snapshot so each change
-                        // re-emits (the 14:22 regression read gesture flags in
-                        // collect only and never re-engaged).
-                        Triple(
-                            viewModel.isStreaming.value && pendingSearchMessageId == null,
-                            isNearBottom.value,
-                            Pair(
-                                userScrolledAway,
-                                !isUserDragging && !userDragAwaitingSettle &&
-                                    !listState.isScrollInProgress,
-                            ),
-                        )
-                    }.collect { (streaming, nearBottom, intent) ->
-                        val (detached, gestureIdle) = intent
-                        // Frozen means "the user has detached intent while a
-                        // turn is live": engaged the INSTANT a drag starts
-                        // (userScrolledAway arms on DragInteraction.Start) so
-                        // growth never eats into an in-progress swipe — the
-                        // 14:46 report ("dragged down while swiping up") was
-                        // the unfrozen row growing ~350px/s under the finger.
-                        // Hysteresis: a drag NEVER releases; release waits for
-                        // either the turn/search to end or a settled arrival
-                        // at the live edge (the reveal). Releasing on
-                        // gesture-start was the 14:03 yank loop.
-                        val off = listState.firstVisibleItemScrollOffset
-                        if (readingFreeze.frozen) {
-                            // "Scroll like normal history": the instant the
-                            // user turns back toward the live edge, thaw — the
-                            // withheld tail expands ONCE here (absorbed into
-                            // the down-scroll) and the rest of the way is
-                            // native 1:1 scrolling. thawOff latches the thaw
-                            // point so the down-scroll cannot re-engage the
-                            // freeze; scrolling back up past it may.
-                            if (frozenOff - off > 12) thawOff = off
-                            frozenOff = off
-                            val release = !streaming || thawOff >= 0 ||
-                                (nearBottom && gestureIdle)
-                            if (!release) return@collect
-                            thawOff = -1
-                            val accumulated = readingFreeze.accumulatedPx
-                            readingFreeze.frozen = false
-                            readingFreeze.accumulatedPx = 0
-                            // Flush at the live edge (0,0) — and ONLY there —
-                            // resumes follow and hides the FABs. Settling
-                            // merely INSIDE the near-bottom threshold must not
-                            // clear the intent: that re-armed the bottom pin
-                            // and yanked the reader flush ("instant snap to
-                            // bottom" while streaming). For those landings the
-                            // expansion is compensated instead so the reading
-                            // point holds and the tail waits below the fold.
-                            val atLiveEdge = listState.firstVisibleItemIndex == 0 &&
-                                listState.firstVisibleItemScrollOffset == 0
-                            if (atLiveEdge) {
-                                userScrolledAway = false
-                                manualDragLeftBottom = false
-                            }
-                            if (accumulated > 0 && !atLiveEdge && pendingSearchMessageId == null) {
-                                listState.dispatchRawDelta(accumulated.toFloat())
-                                AppLogger.debug(
-                                    "ScrollReadingAnchor",
-                                    "release acc=$accumulated nearBottom=$nearBottom " +
-                                        "firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
-                                )
-                            }
-                        } else {
-                            val pastThaw = thawOff < 0 ||
-                                off >= thawOff + 12
-                            if (streaming && detached && pastThaw && ScrollDebugFlags.readingAnchorEnabled) {
-                                readingFreeze.frozen = true
-                                readingFreeze.freezeEpoch++
-                                frozenOff = off
-                                thawOff = -1
-                                AppLogger.debug(
-                                    "ScrollReadingAnchor",
-                                    "engage epoch=${readingFreeze.freezeEpoch} " +
-                                        "firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
-                                )
-                            }
-                        }
-                    }
+                // [T-android-reading-anchor] The reader-detached position
+                // keeper. While a turn is live and the user has detached from
+                // the live edge, the LazyColumn's measure passes absorb
+                // content-chain changes under a still viewport — streaming
+                // growth, the thinking→text handoff collapse, live-edge
+                // insertions — by scrolling exactly the measured top-edge
+                // rise INSIDE the measure frame, the only zero-lag
+                // compensation point (the measured 12:51 sawtooth showed
+                // collector-issued corrections, dispatchRawDelta and
+                // requestScrollToItem alike, always landing one frame late).
+                // Supersedes the height-freeze scheme, whose frozen row
+                // height went stale across the handoff, collapsed the row on
+                // zero-height recycle measures, and needed a raw-delta flush
+                // plus frozenOff/thawOff hysteresis on release. Compaction is
+                // deliberately out of scope: it removes rows under the
+                // reader, which must re-anchor, not hold. See ReadingAnchor.kt.
+                val readingAnchorActive: () -> Boolean = {
+                    ScrollDebugFlags.readingAnchorEnabled &&
+                        userScrolledAway && pendingSearchMessageId == null &&
+                        (viewModel.isStreaming.value ||
+                            (lastStreamEndMs > 0L && System.currentTimeMillis() - lastStreamEndMs <= STREAM_END_ARM_GRACE_MS))
                 }
                 LaunchedEffect(pendingSearchMessageId, flatItems, imeBottomPx, searchLeadingRows) {
                     val target = pendingSearchMessageId ?: return@LaunchedEffect
@@ -4180,6 +4099,10 @@ fun ChatScreen(
                         bottom = if (bottomReserve == 0.dp) 12.dp else bottomReserve,
                     ),
                     modifier = Modifier
+                        // [T-android-reading-anchor] Measure-frame detached-
+                        // reading compensation; outermost so it wraps the
+                        // list's own measure. See ReadingAnchor.kt.
+                        .liveReadingAnchor(readingAnchor, listState, active = readingAnchorActive)
                         .fillMaxWidth()
                         .nestedScroll(userScrollPauseConnection)
                         // [T-android-chat-max-content-width] Cap the reading
@@ -4364,24 +4287,9 @@ fun ChatScreen(
                             }
                         }
                         val isNewestItem = item == flatItems.lastOrNull()
-                        val isLiveStreamingRow = when (item) {
-                            is FlatChatItem.AssistantText -> item.isStreaming
-                            is FlatChatItem.AssistantMarkdownBlock -> item.messageIsStreaming
-                            is FlatChatItem.AssistantThinking -> item.messageIsStreaming && item.isLastBlockOverall
-                            is FlatChatItem.AssistantLegacyContent -> item.isStreaming
-                            else -> false
-                        }
-                        val rowFreeze = remember(item.key) { RowFreezeCtl() }
                         Box(
                             modifier = Modifier
                                 .alpha(rowAlpha)
-                                .then(
-                                    if (isLiveStreamingRow) {
-                                        Modifier.liveRowReadingFreeze(rowFreeze, readingFreeze, active = true)
-                                    } else {
-                                        Modifier
-                                    }
-                                )
                                 .then(
                                     if (isNewestItem) {
                                         Modifier.onPlaced {

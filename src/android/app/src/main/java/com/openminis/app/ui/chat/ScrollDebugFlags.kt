@@ -21,7 +21,10 @@ import android.provider.Settings
  *                also the on-device probe for the offset/scrollOffset
  *                coordinate convention under reverseLayout
  *   nopin      — disable the BottomFollowLayout bottom pin
- *   noanchor   — disable the detached reading-anchor compensation
+ *   anchor     — enable the measure-frame reading-anchor compensation
+ *                (detached-reading growth absorption, ReadingAnchor.kt);
+ *                opt-in because its behavior changes how the viewport
+ *                reacts to streaming growth while the reader is away
  *   notrailing — disable the trailing-row follow scroll
  *   noreserve  — disable the reserve-change follow scroll
  *   all        — shorthand for trace,frames
@@ -92,7 +95,7 @@ object ScrollDebugFlags {
             trace = "trace" in tokens || "all" in tokens,
             frames = "frames" in tokens || "all" in tokens,
             pinEnabled = "nopin" !in tokens,
-            anchorEnabled = "anchor" in tokens || "all" in tokens
+            anchorEnabled = "anchor" in tokens || "all" in tokens,
             trailingEnabled = "notrailing" !in tokens,
             reserveEnabled = "noreserve" !in tokens,
         )
