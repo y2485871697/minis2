@@ -3773,27 +3773,32 @@ fun ChatScreen(
                     // collect, so nothing re-emitted when a drag ended and the
                     // freeze never engaged at all (the live row kept sliding).
                     snapshotFlow {
-                        val streaming = viewModel.isStreaming.value
-                        val nearBottom = isNearBottom.value
-                        val noSearch = pendingSearchMessageId == null
-                        val gestureIdle = !isUserDragging && !userDragAwaitingSettle &&
-                            !listState.isScrollInProgress
-                        // Not parked exactly on the live edge (there the
-                        // native reverse-layout follow owns the viewport).
-                        val offLiveEdge = !(listState.firstVisibleItemIndex == 0 &&
-                            listState.firstVisibleItemScrollOffset == 0)
-                        Triple(streaming, nearBottom, noSearch && gestureIdle && offLiveEdge)
-                    }.collect { (streaming, nearBottom, freeable) ->
-                        // Hysteresis on purpose: NEAR-BOTTOM ALONE MUST NOT
-                        // RELEASE. It flips true while the user is still
-                        // dragging toward the live edge, and releasing then
-                        // fired the +acc raw delta mid-gesture — the measured
-                        // 14:03 loop yanked the reader back to the frozen
-                        // position on every drag ("pinned in place"). Release
-                        // only when the gesture has fully settled at the edge,
-                        // or the turn/search ended.
+                        // Every input read INSIDE the snapshot so each change
+                        // re-emits (the 14:22 regression read gesture flags in
+                        // collect only and never re-engaged).
+                        Triple(
+                            viewModel.isStreaming.value && pendingSearchMessageId == null,
+                            isNearBottom.value,
+                            Triple(
+                                userScrolledAway,
+                                !isUserDragging && !userDragAwaitingSettle &&
+                                    !listState.isScrollInProgress,
+                            ),
+                        )
+                    }.collect { (streaming, nearBottom, intent) ->
+                        val (detached, gestureIdle) = intent
+                        // Frozen means "the user has detached intent while a
+                        // turn is live": engaged the INSTANT a drag starts
+                        // (userScrolledAway arms on DragInteraction.Start) so
+                        // growth never eats into an in-progress swipe — the
+                        // 14:46 report ("dragged down while swiping up") was
+                        // the unfrozen row growing ~350px/s under the finger.
+                        // Hysteresis: a drag NEVER releases; release waits for
+                        // either the turn/search to end or a settled arrival
+                        // at the live edge (the reveal). Releasing on
+                        // gesture-start was the 14:03 yank loop.
                         if (readingFreeze.frozen) {
-                            val release = !streaming || !freeable || (nearBottom && freeable)
+                            val release = !streaming || (nearBottom && gestureIdle)
                             if (!release) return@collect
                             val accumulated = readingFreeze.accumulatedPx
                             readingFreeze.frozen = false
@@ -3807,7 +3812,7 @@ fun ChatScreen(
                                 )
                             }
                         } else {
-                            if (streaming && freeable) {
+                            if (streaming && detached) {
                                 readingFreeze.frozen = true
                                 readingFreeze.freezeEpoch++
                                 AppLogger.debug(
