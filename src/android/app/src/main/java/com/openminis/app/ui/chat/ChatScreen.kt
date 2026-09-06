@@ -879,7 +879,7 @@ fun ChatScreen(
     // across forward navigation (file preview, env vars, etc.); see
     // ChatViewModel.listState for the why.
     val listState = viewModel.listState
-    val readingAnchor = remember { ReadingAnchorState() }
+    val readingAnchor = remember(sessionId) { ReadingAnchorState() }
     // T325: draft persists on the VM so navigation (e.g. push EnvVars and
     // pop back) doesn't wipe what the user has typed. Mirrors iOS
     // `AIChatView` which binds the composer against `vm.inputText`.
@@ -4315,6 +4315,10 @@ fun ChatScreen(
                         val isNewestItem = item == flatItems.lastOrNull()
                         Box(
                             modifier = Modifier
+                                // [T-android-reading-anchor] Finger-immune
+                                // growth probe: the row's measured height
+                                // delta feeds the detached-reading anchor.
+                                .growthProbe(readingAnchor, item.key)
                                 .alpha(rowAlpha)
                                 .then(
                                     if (isNewestItem) {
